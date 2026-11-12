@@ -111,6 +111,8 @@ object Sym {
     @DrawableRes val detach = R.drawable.ic_sym_link_off
     @DrawableRes val canvas = R.drawable.ic_sym_aspect_ratio
     @DrawableRes val closeGaps = R.drawable.ic_sym_space_bar
+    @DrawableRes val cutClip = R.drawable.ic_sym_cut
+    @DrawableRes val paste = R.drawable.ic_sym_content_paste
 }
 
 @Composable

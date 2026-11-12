@@ -25,6 +25,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod areas;
+pub mod analysis;
 pub mod control;
 pub mod engine;
 pub mod features;
@@ -375,6 +376,7 @@ impl Lab {
             s.state.active_sequence.and_then(|id| s.project.sequence(id)).map_or(0, |q| q.settings.width.max(q.settings.height))
         };
         let draft = max_side < full;
+        self.engine.analyses.note_playback();
         filmcraft_media::cancel::with_draft(draft, || filmcraft_media::cancel::with_catch_up(Some(filmcraft_time::Tick::ZERO), || self.engine.render(t, max_side))).map_err(LabError::Engine)
     }
 

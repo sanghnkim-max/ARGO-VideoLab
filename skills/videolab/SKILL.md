@@ -29,14 +29,14 @@ return { name: t.name, duration: t.duration, look };   // {image} objects come b
 
 Areas: `doc` (timeline, items, preview, contactSheet, undo/redo, save/open/new/demo), `media`
 (files, import, thumbnails, peaks), `timeline` (append, place, split, trim, move, delete, speed,
-volume, fade, transition, select, seek), `text` (add, caption, templates, applyTemplate),
+volume, fade, transition, select, seek, copy, cut, paste, clipboard), `text` (add, caption, templates, applyTemplate),
 `look` (filters, filter, adjust, effects, effect, state — filters and adjustments stay
 separate), `clip` (transform, setTransform, keyframe, freeze, reverse, smoothSlowmo, mirror,
 rotate, autoCut), `compose` (state, crop, blend, chromaKey, mask, stabilize, autoReframe,
 duplicate, detachAudio, voices, voice, enhanceVoice), `project` (canvas, setCanvas, closeGaps),
 `audio` (duck, normalize, voices, narrate), `speech` (captions,
 removePauses, removeFillers, models — Whisper on the device; needs a downloaded model),
-`export` (start, jobs, cancel), `engine` (FilmCraft's ~700 commands: commands, describe, run,
+`export` (start, jobs, cancel, interchange — XML / FCPXML / EDL / OTIO / AAF / OMF), `engine` (FilmCraft's ~700 commands: commands, describe, run,
 batch). `lab.help('<area>')` returns schemas — read it before guessing parameter names.
 
 * Images are handles (`"img:N"`); return `{image}` objects to see them. Keep `maxSide` small.

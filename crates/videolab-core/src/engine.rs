@@ -58,6 +58,8 @@ pub struct Engine {
     /// preview and playback read. Keyed by item, for the document epoch they were opened in
     /// (FilmCraft reuses item ids across projects).
     thumb_sources: Mutex<ThumbSources>,
+    /// Stabilizer / reframe analysis, in the background (see `analysis`).
+    pub analyses: Arc<crate::analysis::Analyses>,
 }
 
 #[derive(Default)]
@@ -73,7 +75,7 @@ impl Engine {
     /// A session over `services` (the workspace).
     pub fn new(services: Arc<crate::services::WorkspaceServices>) -> Self {
         let session = Session::new(services.clone());
-        Self { session: Arc::new(Mutex::new(session)), services, gpu: Mutex::new(None), gpu_wanted: AtomicBool::new(false), gpu_failed: AtomicBool::new(false), thumb_sources: Mutex::default() }
+        Self { session: Arc::new(Mutex::new(session)), services, gpu: Mutex::new(None), gpu_wanted: AtomicBool::new(false), gpu_failed: AtomicBool::new(false), thumb_sources: Mutex::default(), analyses: Arc::default() }
     }
 
     /// A workspace path (relative, or absolute inside it) as the absolute path the engine stores.
@@ -118,7 +120,8 @@ impl Engine {
         let s = g.project.sequence(seq).ok_or("no sequence is open")?;
         let (width, height) = (s.settings.width, s.settings.height);
         let rate = g.sequence_rate();
-        let project = g.project.clone();
+        // Clips still being analysed draw without their stabilizer / reframe (see `analysis`).
+        let project = self.analyses.strip_unready(g.project.clone(), seq, &g.media, &g.services);
         let provider = g.media.provider(project.clone(), g.services.clone());
         Ok(Snapshot { project, seq, provider, rate, width, height })
     }

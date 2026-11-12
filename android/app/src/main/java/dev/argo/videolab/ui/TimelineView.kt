@@ -79,6 +79,12 @@ private sealed interface Drop {
 }
 
 /** A clip being moved (long press, then drag): it follows the finger until release. */
+/** A swipe down across a clip: where it would split, and whether letting go splits it. */
+private data class CutSwipe(val clip: Long, val at: Double, val armed: Boolean)
+
+/** The quick menu: for a clip (or empty space: paste only), at a time and a place on screen. */
+private data class QuickMenu(val clip: Long?, val at: Double, val position: Offset)
+
 private data class ClipDrag(val clip: Clip, val video: Boolean, val start: Double, val y: Float, val drop: Drop?)
 
 /**
@@ -106,6 +112,14 @@ fun TimelineView(
     /** Move a clip to start at the given seconds; the track is an id, "new", or null (its own). */
     onMove: (Long, Double, Any?) -> Unit,
     onAdd: () -> Unit,
+    /** Split a clip at the given seconds (swipe down across it). */
+    onSplitAt: (Long, Double) -> Unit = { _, _ -> },
+    /** A quick-menu action: split, cut, copy, paste, duplicate, delete; the clip (null: empty space) and seconds. */
+    onQuick: (String, Long?, Double) -> Unit = { _, _, _ -> },
+    /** Whether the clipboard has clips (the menu offers Paste). */
+    canPaste: Boolean = false,
+    /** Two-finger tap. */
+    onUndo: () -> Unit = {},
 ) {
     val density = LocalDensity.current
     val media by lab.mediaVersion.collectAsState()
@@ -116,6 +130,9 @@ fun TimelineView(
     var pps by remember { mutableFloatStateOf(with(density) { 64.dp.toPx() }) }
     var trim by remember { mutableStateOf<TrimDrag?>(null) }
     var moving by remember { mutableStateOf<ClipDrag?>(null) }
+    var cut by remember { mutableStateOf<CutSwipe?>(null) }
+    var menu by remember { mutableStateOf<QuickMenu?>(null) }
+    val paste by rememberUpdatedState(canPaste)
     val haptics = LocalHapticFeedback.current
     val current by rememberUpdatedState(playhead)
     val tl by rememberUpdatedState(timeline)
@@ -180,53 +197,65 @@ fun TimelineView(
                             }
                         }
                     }
-                    // Long-press a clip (not a handle) to move it.
+                    val hitRow = rowsNow.firstOrNull { down.position.y in it.top..(it.top + it.height) }
+                    val tAtDown = t0 + (down.position.x - cx) / pps
+                    val hit = hitRow?.clips?.firstOrNull { tAtDown in it.start..it.end }?.takeIf { hitRow.track != null }
                     if (handle == null) {
-                        val hitRow = rowsNow.firstOrNull { down.position.y in it.top..(it.top + it.height) }
-                        val tAt = t0 + (down.position.x - cx) / pps
-                        val hit = hitRow?.clips?.firstOrNull { tAt in it.start..it.end }
-                        if (hit != null && hitRow.track != null) {
-                            val long = awaitLongPressOrCancellation(down.id)
-                            if (long != null) {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onSelect(hit.id)
-                                var start = hit.start
-                                var y = long.position.y
-                                moving = ClipDrag(hit, hitRow.video, start, y, null)
-                                // Edges it snaps to: the playhead, 0, and other clips' ends.
-                                val edges = listOf(t0, 0.0) + tl.tracks.flatMap { tr -> tr.clips.filter { it.id != hit.id }.flatMap { listOf(it.start, it.end) } }
-                                val snapPx = 10.dp.toPx()
-                                var raw = start
-                                while (true) {
-                                    val ev = awaitPointerEvent()
-                                    val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
-                                    if (!ch.pressed) break
-                                    raw = (raw + ch.positionChange().x / pps).coerceAtLeast(0.0)
-                                    y = ch.position.y
-                                    // Snap either edge of the clip to the nearest edge within reach.
-                                    val len = hit.end - hit.start
-                                    val best = edges.flatMap { e -> listOf(e to e, e to e - len) }.minByOrNull { (e, s) -> abs(s - raw) }
-                                    start = if (best != null && abs(best.second - raw) * pps < snapPx) best.second.coerceAtLeast(0.0) else raw
-                                    moving = ClipDrag(hit, hitRow.video, start, y, dropAt(tl, rowsNow, hitRow.video, y))
-                                    ch.consume()
-                                }
-                                val m = moving
-                                moving = null
-                                if (m != null) {
-                                    val track: Any? = when (val d = m.drop) {
-                                        is Drop.NewTrack -> d.reuse ?: "new"
-                                        is Drop.OnTrack -> d.id.takeIf { it != hitRow.track.id }
-                                        null -> null
-                                    }
-                                    if (track != null || abs(m.start - hit.start) > 1e-3) onMove(hit.id, m.start, track)
-                                }
+                        // Long press: on a clip, drag it to move it (or let go in place for the quick
+                        // menu); on empty space, the quick menu (paste).
+                        val long = awaitLongPressOrCancellation(down.id)
+                        if (long != null) {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (hit == null || hitRow == null) {
+                                while (currentEvent.changes.any { it.pressed }) awaitPointerEvent().changes.forEach { it.consume() }
+                                if (paste) menu = QuickMenu(null, max(0.0, tAtDown), long.position)
                                 return@awaitEachGesture
                             }
-                            // Released before the long press: a tap selects the clip.
-                            if (currentEvent.changes.none { it.pressed }) {
-                                onSelect(hit.id)
+                            onSelect(hit.id)
+                            var start = hit.start
+                            var y = long.position.y
+                            var travel = 0f
+                            moving = ClipDrag(hit, hitRow.video, start, y, null)
+                            // Edges it snaps to: the playhead, 0, and other clips' ends.
+                            val edges = listOf(t0, 0.0) + tl.tracks.flatMap { tr -> tr.clips.filter { it.id != hit.id }.flatMap { listOf(it.start, it.end) } }
+                            val snapPx = 10.dp.toPx()
+                            var raw = start
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
+                                if (!ch.pressed) break
+                                travel += ch.positionChange().getDistance()
+                                raw = (raw + ch.positionChange().x / pps).coerceAtLeast(0.0)
+                                y = ch.position.y
+                                // Snap either edge of the clip to the nearest edge within reach.
+                                val len = hit.end - hit.start
+                                val best = edges.flatMap { e -> listOf(e to e, e to e - len) }.minByOrNull { (_, s) -> abs(s - raw) }
+                                start = if (best != null && abs(best.second - raw) * pps < snapPx) best.second.coerceAtLeast(0.0) else raw
+                                moving = ClipDrag(hit, hitRow.video, start, y, dropAt(tl, rowsNow, hitRow.video, y))
+                                ch.consume()
+                            }
+                            val m = moving
+                            moving = null
+                            if (travel < slop) {
+                                // Held and let go in place: the quick menu.
+                                menu = QuickMenu(hit.id, tAtDown, long.position)
                                 return@awaitEachGesture
                             }
+                            if (m != null) {
+                                val track: Any? = when (val d = m.drop) {
+                                    is Drop.NewTrack -> d.reuse ?: "new"
+                                    is Drop.OnTrack -> d.id.takeIf { it != hitRow.track!!.id }
+                                    null -> null
+                                }
+                                if (track != null || abs(m.start - hit.start) > 1e-3) onMove(hit.id, m.start, track)
+                            }
+                            return@awaitEachGesture
+                        }
+                        // Released before the long press: a tap selects the clip; tapping the
+                        // selected clip again opens its quick menu.
+                        if (currentEvent.changes.none { it.pressed }) {
+                            if (hit != null && hit.id == sel) menu = QuickMenu(hit.id, tAtDown, down.position) else onSelect(hit?.id)
+                            return@awaitEachGesture
                         }
                     }
                     val tracker = VelocityTracker()
@@ -235,13 +264,28 @@ fun TimelineView(
                     var dxTotal = 0f
                     var zooming = false
                     var lastSpan = 0f
+                    var firstSpan = 0f
+                    var spanChange = 0f
+                    var fingers = 1
                     var scrub = t0
+                    var cutting = false
+                    // Where a swipe down splits: under the finger, snapped to the playhead nearby,
+                    // kept a frame inside the clip.
+                    val cutAt = hit?.let { c ->
+                        val frame = 1.0 / tl.fps.coerceIn(1.0, 240.0)
+                        val near = abs(down.position.x - cx) < 16.dp.toPx()
+                        (if (near) t0 else tAtDown).coerceIn(c.start + frame, max(c.start + frame, c.end - frame))
+                    }
+                    val cutDistance = 44.dp.toPx()
                     while (true) {
                         val ev = awaitPointerEvent()
                         val pressed = ev.changes.filter { it.pressed }
                         if (pressed.isEmpty()) break
-                        if (pressed.size >= 2 && handle == null) {
+                        fingers = max(fingers, pressed.size)
+                        if (pressed.size >= 2 && handle == null && !cutting) {
                             val span = (pressed[0].position - pressed[1].position).getDistance()
+                            if (firstSpan == 0f) firstSpan = span
+                            spanChange = max(spanChange, abs(span - firstSpan))
                             if (zooming && lastSpan > 0f) pps = (pps * span / lastSpan).coerceIn(4f, 2400f)
                             zooming = true
                             lastSpan = span
@@ -249,6 +293,19 @@ fun TimelineView(
                             continue
                         }
                         val ch = pressed.first()
+                        val total = ch.position - down.position
+                        // A swipe down that starts on a clip: the cut line follows, armed past a
+                        // thumb's length.
+                        if (!moved && !cutting && !zooming && handle == null && hit != null && cutAt != null &&
+                            total.y > slop && total.y > abs(total.x) * 1.5f
+                        ) cutting = true
+                        if (cutting && hit != null && cutAt != null) {
+                            val armed = total.y > cutDistance
+                            if (armed && cut?.armed != true) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            cut = CutSwipe(hit.id, cutAt, armed)
+                            ch.consume()
+                            continue
+                        }
                         val dx = ch.positionChange().x
                         dxTotal += dx
                         if (!moved && abs(dxTotal) > slop) moved = true
@@ -264,10 +321,23 @@ fun TimelineView(
                         }
                     }
                     when {
+                        cutting -> {
+                            val c = cut
+                            cut = null
+                            if (c != null && c.armed) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onSplitAt(c.clip, c.at)
+                            }
+                        }
                         handle != null && moved -> {
                             val d = trim
                             trim = null
                             if (d != null && abs(d.delta) > 0.01) onTrim(d.clip, d.edge, d.delta)
+                        }
+                        // Two fingers down and up without pinching or sliding: undo.
+                        zooming && fingers >= 2 && spanChange < slop * 2 && !moved && (currentEvent.changes.firstOrNull()?.uptimeMillis ?: down.uptimeMillis) - down.uptimeMillis < 400 -> {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onUndo()
                         }
                         zooming -> {}
                         moved -> {
@@ -291,10 +361,9 @@ fun TimelineView(
                             }
                         }
                         else -> {
-                            // Tap: select the clip under the finger.
-                            val tAt = t0 + (down.position.x - cx) / pps
-                            val row = rowsNow.firstOrNull { down.position.y in it.top..(it.top + it.height) }
-                            onSelect(row?.clips?.firstOrNull { tAt in it.start..it.end }?.id)
+                            // Tap: select the clip under the finger (the selected one: its menu).
+                            if (hit != null && hit.id == sel && handle == null) menu = QuickMenu(hit.id, tAtDown, down.position)
+                            else onSelect(hit?.id)
                         }
                     }
                 }
@@ -354,6 +423,15 @@ fun TimelineView(
                 drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(x0, top), Size(max(x1 - x0, 4f), h), CornerRadius(6.dp.toPx()))
                 drawRoundRect(Color.White, Offset(x0, top), Size(max(x1 - x0, 4f), h), CornerRadius(6.dp.toPx()), style = Stroke(2.dp.toPx()))
             }
+            // A swipe-down split: the cut line through the clip (red once letting go splits).
+            cut?.let { c ->
+                val r = drawn.firstOrNull { row -> row.clips.any { it.id == c.clip } } ?: return@let
+                val x = cx + ((c.at - now) * pps).toFloat()
+                val color = if (c.armed) Color(0xFFFF5A5F) else Color.White.copy(alpha = 0.6f)
+                drawLine(color, Offset(x, r.top - 6.dp.toPx()), Offset(x, r.top + r.height + 6.dp.toPx()), strokeWidth = 3.dp.toPx())
+                val label = measurer.measure(if (c.armed) "Let go to split" else "Swipe down to split", TextStyle(color = color, fontSize = 10.sp, fontWeight = FontWeight.SemiBold))
+                drawText(label, topLeft = Offset((x - label.size.width / 2f).coerceIn(4f, size.width - label.size.width - 4f), max(rulerH, r.top - label.size.height - 8.dp.toPx())))
+            }
             // The playhead.
             drawLine(Playhead, Offset(cx, rulerH * 0.55f), Offset(cx, size.height), strokeWidth = 2.dp.toPx())
         }
@@ -370,6 +448,29 @@ fun TimelineView(
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.material3.IconButton(onClick = onAdd) { SymIcon(Sym.add, "Add media", tint = Color.Black) }
+            }
+        }
+        // The quick menu, where the finger was.
+        menu?.let { m ->
+            val (x, y) = with(density) { m.position.x.toDp() to m.position.y.toDp() }
+            Box(Modifier.offset(x = x, y = y).size(1.dp)) {
+                androidx.compose.material3.DropdownMenu(expanded = true, onDismissRequest = { menu = null }) {
+                    @Composable fun item(label: String, action: String, icon: Int) = androidx.compose.material3.DropdownMenuItem(
+                        text = { androidx.compose.material3.Text(label) },
+                        leadingIcon = { SymIcon(icon, null, Modifier.size(20.dp)) },
+                        onClick = { menu = null; onQuick(action, m.clip, m.at) },
+                    )
+                    if (m.clip != null) {
+                        item("Split", "split", Sym.split)
+                        item("Cut", "cut", Sym.cutClip)
+                        item("Copy", "copy", Sym.duplicate)
+                        if (canPaste) item("Paste after", "paste", Sym.paste)
+                        item("Duplicate", "duplicate", Sym.duplicate)
+                        item("Delete", "delete", Sym.delete)
+                    } else if (canPaste) {
+                        item("Paste here", "paste", Sym.paste)
+                    }
+                }
             }
         }
         if (widthPx <= 0f) return@BoxWithConstraints

@@ -1,6 +1,7 @@
 package dev.argo.videolab.ui
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -94,12 +95,66 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
         scrub = null
     }
 
-    fun save() = scope.launch {
+    suspend fun save() {
         val name = (timeline?.name ?: "Untitled").replace(Regex("[^A-Za-z0-9 _-]"), "_").trim().ifEmpty { "Untitled" }
         val r = lab.fn("doc.save")
         if (r.isFailure) {
             lab.clearMessage()
             lab.fn("doc.save", """{"path":"projects/$name.fcproj"}""")
+        }
+    }
+
+    // Save, then leave. In the app's scope, not this screen's: leaving disposes the screen and
+    // would cancel a save launched here; and Home lists saved projects as it opens, so it waits.
+    var closing by remember { mutableStateOf(false) }
+    fun closeProject() {
+        if (closing) return
+        closing = true
+        player.stop()
+        app.appScope.launch {
+            save()
+            onClose()
+        }
+    }
+
+    // The clipboard (timeline.copy / cut): whether the quick menu offers Paste.
+    var canPaste by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        canPaste = ((lab.fn("timeline.clipboard").getOrNull() as? kotlinx.serialization.json.JsonObject)?.get("clips") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull()?.let { it > 0 } == true
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    fun toast(text: String) = android.widget.Toast.makeText(context, text, android.widget.Toast.LENGTH_SHORT).show()
+
+    /** The timeline's quick menu (long-press, or tap the selected clip). */
+    fun quick(action: String, id: Long?, seconds: Double) {
+        val clip = id?.let { timeline?.clip(it) }
+        // The main track closes up when a clip leaves it (as Delete does).
+        val ripple = clip?.kind == ClipKind.Video
+        scope.launch {
+            when (action) {
+                "split" -> {
+                    // At the playhead when it is over the clip, else where the finger was.
+                    val at = playheadNow().takeIf { clip != null && it > clip.start && it < clip.end } ?: seconds
+                    lab.fn("timeline.split", """{"seconds":$at,"clip":$id}""")
+                }
+                "cut" -> lab.fn("timeline.cut", """{"clips":[$id],"ripple":$ripple}""").onSuccess { canPaste = true; selected = null; toast("Cut") }
+                "copy" -> lab.fn("timeline.copy", """{"clips":[$id]}""").onSuccess { canPaste = true; toast("Copied") }
+                "paste" -> lab.fn("timeline.paste", """{"seconds":${clip?.end ?: seconds}}""")
+                "duplicate" -> lab.fn("compose.duplicate", """{"clip":$id}""")
+                "delete" -> {
+                    lab.fn("timeline.delete", """{"clips":[$id],"ripple":$ripple}""")
+                    selected = null
+                }
+            }
+        }
+    }
+
+    // Back: close the open sheet, then the agent, then the project (saved, as ✕ does).
+    BackHandler {
+        when {
+            tool != null -> tool = null
+            agentOpen -> agentOpen = false
+            else -> closeProject()
         }
     }
 
@@ -110,7 +165,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     // ── top bar ────────────────────────────────────────────────────────────
                     Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        SymButton(Sym.close, "Close project", { player.stop(); save(); onClose() })
+                        SymButton(Sym.close, "Close project", { closeProject() })
                         Text(timeline?.name ?: "", maxLines = 1, fontSize = 14.sp, color = Color(0xFFCCCCD2), modifier = Modifier.weight(1f))
                         if (state.busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         SymButton(Sym.agent, "Agent", { agentOpen = !agentOpen }, tint = if (agentOpen) Accent else null)
@@ -163,6 +218,10 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                                 scope.launch { lab.fn("timeline.move", """{"clip":$id,"seconds":$seconds$t}""") }
                             },
                             onAdd = { pickMedia.launch(arrayOf("video/*", "audio/*", "image/*")) },
+                            onSplitAt = { id, seconds -> scope.launch { lab.fn("timeline.split", """{"seconds":$seconds,"clip":$id}""") } },
+                            onQuick = { action, id, seconds -> quick(action, id, seconds) },
+                            canPaste = canPaste,
+                            onUndo = { scope.launch { lab.fn("doc.undo") } },
                         )
                     } else {
                         Box(Modifier.fillMaxWidth().height(232.dp), contentAlignment = Alignment.Center) {
@@ -203,7 +262,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                                 ToolButton(Sym.chromaKey, "Chroma key") { tool = Tool.ChromaKey }
                             }
                             if (clip.kind == ClipKind.Video) {
-                                ToolButton(Sym.stabilize, "Stabilize") { scope.launch { lab.fn("compose.stabilize", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Stabilizing: the first play analyses the clip" else "Stabilize off") } } }
+                                ToolButton(Sym.stabilize, "Stabilize") { scope.launch { lab.fn("compose.stabilize", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Stabilizing: it is analysed in the background (paused while you play) and shows when ready" else "Stabilize off") } } }
                                 ToolButton(Sym.reframe, "Reframe") { scope.launch { lab.fn("compose.autoReframe", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Auto reframe on" else "Auto reframe off") } } }
                             }
                             if (clip.kind == ClipKind.Video) {

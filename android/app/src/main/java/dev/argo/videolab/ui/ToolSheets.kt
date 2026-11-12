@@ -369,4 +369,23 @@ private fun ExportSheet(app: VideoLabApp, onDone: () -> Unit) {
             TextButton(onClick = { done = null; progress = 0f; status = "" }) { Text("Export again") }
         }
     }
+    // The timeline itself, for another editor: the cuts, tracks and timings, referencing the media.
+    Text("Edit list for another editor", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(start = 16.dp, top = 10.dp))
+    Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        listOf("xml" to "Premiere XML", "fcpxml" to "Final Cut", "edl" to "EDL", "otio" to "OTIO", "aaf" to "AAF").forEach { (fmt, label) ->
+            FilterChip(selected = false, enabled = timeline != null, onClick = {
+                val name = (timeline?.name ?: "video").replace(Regex("[^A-Za-z0-9_-]"), "_")
+                val path = "exports/$name.$fmt"
+                scope.launch {
+                    val r = app.lab.fn("export.interchange", """{"format":"$fmt","path":${q(path)}}""")
+                    if (r.isFailure) return@launch
+                    val f = File(app.workspace, path)
+                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", f)
+                    val type = when (fmt) { "edl" -> "text/plain"; "otio" -> "application/json"; "aaf" -> "application/octet-stream"; else -> "application/xml" }
+                    val send = Intent(Intent.ACTION_SEND).setType(type).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(Intent.createChooser(send, "Share $label"))
+                }
+            }, label = { Text(label) })
+        }
+    }
 }

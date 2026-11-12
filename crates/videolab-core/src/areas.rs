@@ -567,6 +567,58 @@ fn register_timeline(r: &mut Registry) {
         .register();
 
     #[derive(Deserialize)]
+    struct Copy {
+        clips: Vec<u64>,
+    }
+    r.function("timeline", "copy", "Copy clips (with their linked sound, effects and keyframes) to the clipboard for timeline.paste")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}}, "required": ["clips"]}))
+        .effects(Effects::ReadOnly)
+        .typed(|ctx, p: Copy| {
+            run(ctx, "timeline.select", json!({"clips": p.clips}))?;
+            run(ctx, "edit.copy", json!({}))
+        })
+        .register();
+
+    r.function("timeline", "cut", "Cut clips: copy them to the clipboard, then delete them; ripple closes the gap")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "ripple": {"type": "boolean"}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Delete| {
+            run(ctx, "timeline.select", json!({"clips": p.clips}))?;
+            let copied = run(ctx, "edit.copy", json!({}))?;
+            run(ctx, "timeline.delete", json!({"clips": p.clips, "ripple": p.ripple}))?;
+            Ok(copied)
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Paste {
+        #[serde(default)]
+        seconds: Option<f64>,
+        #[serde(default = "yes")]
+        insert: bool,
+    }
+    r.function("timeline", "paste", "Paste the clipboard at `seconds` (default playhead), on the tracks the clips were copied from; insert (default) pushes what follows later, insert=false overwrites. The pasted clips become the selection")
+        .params(json!({"type": "object", "properties": {"seconds": {"type": "number"}, "insert": {"type": "boolean"}}}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Paste| {
+            if engine(ctx)?.lock().state.clipboard.is_empty() {
+                return Err(ApiError::bad_params("the clipboard is empty: copy or cut clips first"));
+            }
+            if let Some(t) = p.seconds {
+                run(ctx, "playhead.set", json!({"seconds": t.max(0.0)}))?;
+            }
+            run(ctx, if p.insert { "edit.pasteInsert" } else { "edit.paste" }, json!({}))?;
+            let s = engine(ctx)?.lock();
+            Ok(json!({"pasted": s.state.selection.iter().map(|c| c.0).collect::<Vec<_>>()}))
+        })
+        .register();
+
+    r.function("timeline", "clipboard", "How many clips the clipboard holds (0: nothing to paste)")
+        .effects(Effects::ReadOnly)
+        .handler(|ctx, _| Ok(json!({"clips": engine(ctx)?.lock().state.clipboard.len()})))
+        .register();
+
+    #[derive(Deserialize)]
     struct Speed {
         clips: Vec<u64>,
         percent: f64,
@@ -822,6 +874,23 @@ fn register_export(r: &mut Registry) {
                 params["scale"] = json!(s);
             }
             run(ctx, "file.exportMedia", params)
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Interchange {
+        format: String,
+        path: String,
+    }
+    r.function("export", "interchange", "Export the active sequence as an edit list for another editor: xml (Premiere / Final Cut 7), fcpxml (Final Cut Pro), edl, otio (OpenTimelineIO), aaf or omf (Avid / Pro Tools), to `path` (e.g. exports/cut.xml). Media is referenced, not copied; `report` lists what did not translate")
+        .params(json!({"type": "object", "properties": {"format": {"enum": ["xml", "fcpxml", "edl", "otio", "aaf", "omf"]}, "path": {"type": "string"}}, "required": ["format", "path"]}))
+        .effects(Effects::Destructive)
+        .typed(|ctx, p: Interchange| {
+            let abs = engine(ctx)?.resolve(&p.path).map_err(|e| ApiError::bad_params(e.to_string()))?;
+            if let Some(dir) = abs.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            run(ctx, "file.exportInterchange", json!({"format": p.format, "path": abs.to_string_lossy()}))
         })
         .register();
 

@@ -401,3 +401,69 @@ fn duplicate_detach_canvas_and_gaps() {
     assert!(call("project.closeGaps", json!({}))["moved"].as_u64().unwrap() >= 1);
     assert!(lab.timeline()["duration"].as_f64().unwrap() < gapped - 4.0, "the gap is gone");
 }
+
+#[test]
+fn copy_cut_paste() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let v1 = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().find(|t| t["kind"] == "video").unwrap()["clips"].as_array().unwrap().clone();
+    assert_eq!(call("timeline.clipboard", json!({}))["clips"], 0);
+    assert!(lab.call("timeline.paste", json!({}), Source::Agent).is_err(), "nothing to paste");
+    let first = v1(&lab)[0].clone();
+    let (clip, n, len) = (first["clip"].as_u64().unwrap(), v1(&lab).len(), first["end"].as_f64().unwrap() - first["start"].as_f64().unwrap());
+    call("timeline.copy", json!({"clips": [clip]}));
+    assert!(call("timeline.clipboard", json!({}))["clips"].as_u64().unwrap() >= 1);
+    // paste (insert) at the end of the first clip: one more clip there, the rest pushed later
+    let dur = lab.timeline()["duration"].as_f64().unwrap();
+    let r = call("timeline.paste", json!({"seconds": first["end"]}));
+    assert!(!r["pasted"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(v1(&lab).len(), n + 1);
+    assert!((v1(&lab)[1]["start"].as_f64().unwrap() - first["end"].as_f64().unwrap()).abs() < 0.05);
+    assert!((lab.timeline()["duration"].as_f64().unwrap() - dur - len).abs() < 0.1);
+    // cut with ripple: gone from V1, and pasteable again
+    let pasted = v1(&lab)[1]["clip"].as_u64().unwrap();
+    call("timeline.cut", json!({"clips": [pasted], "ripple": true}));
+    assert_eq!(v1(&lab).len(), n);
+    assert!((lab.timeline()["duration"].as_f64().unwrap() - dur).abs() < 0.1, "ripple closed the gap");
+    call("timeline.paste", json!({"seconds": 0.0}));
+    assert_eq!(v1(&lab).len(), n + 1);
+}
+
+#[test]
+fn stabilizer_analyses_in_the_background() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, start) = demo_clips(&lab);
+    let at = filmcraft_time::Tick::from_seconds_f64(start + 1.0);
+    let plain = lab.engine.render(at, 320).unwrap().0.rgba;
+    lab.call("compose.stabilize", json!({"clips": [clip]}), Source::Agent).unwrap();
+    // Not analysed yet: the preview is drawn without it, at once, and the analysis is queued.
+    let t0 = std::time::Instant::now();
+    let first = lab.engine.render(at, 320).unwrap().0.rgba;
+    assert_eq!(first, plain, "drawn without the stabilizer while it is analysed");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(lab.engine.analyses.pending(), 1);
+    // Playback holds the worker; then it finishes and the stabilizer shows.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while lab.engine.analyses.pending() > 0 {
+        assert!(std::time::Instant::now() < deadline, "analysis did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let after = lab.engine.render(at, 320).unwrap().0.rgba;
+    assert_ne!(after, plain, "the stabilizer applies once analysed");
+}
+
+#[test]
+fn interchange_exports() {
+    let (d, lab) = lab();
+    demo(&lab);
+    for (format, ext, head) in [("xml", "xml", "<xmeml"), ("fcpxml", "fcpxml", "<fcpxml"), ("edl", "edl", "TITLE"), ("otio", "otio", "OTIO_SCHEMA")] {
+        let path = format!("exports/cut.{ext}");
+        let r = lab.call("export.interchange", json!({"format": format, "path": path}), Source::Ui).unwrap_or_else(|e| panic!("{format}: {e}"));
+        let text = std::fs::read_to_string(d.path().join(&path)).unwrap();
+        assert!(text.contains(head), "{format}: {}", &text[..text.len().min(200)]);
+        assert!(r["bytes"].as_u64().unwrap() > 100, "{r}");
+    }
+    assert!(lab.call("export.interchange", json!({"format": "mov", "path": "exports/x.mov"}), Source::Ui).is_err());
+}

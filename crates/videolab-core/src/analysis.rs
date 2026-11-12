@@ -1,0 +1,237 @@
+//! Background analysis for effects that look at the whole clip before they can draw a frame:
+//! Warp Stabilizer (tracks the camera through every frame of the clip) and Auto Reframe (finds
+//! the subject in the frames around each one). FilmCraft runs that analysis inside the first
+//! render that needs it and caches the result. Inside playback that does not work: the analysis
+//! of a 20-second 4K clip takes seconds, playback cancels renders that fall behind, so it is
+//! cancelled and restarted frame after frame, never finishes, and playback halts.
+//!
+//! So previews and playback draw a clip without those effects until its analysis is done
+//! ([`Analyses::strip_unready`]), and one background worker does the analysis: it renders the
+//! clip the way FilmCraft's own render would (one frame for the stabilizer, which analyses the
+//! whole clip; every frame, small, for reframing), which fills FilmCraft's caches, then the
+//! effect shows. The worker reads its own copies of the media files (never seeking the decoder
+//! playback reads) and waits while playback runs, so it only uses the time between plays.
+//! Exports are not affected: they render every effect themselves.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
+
+use filmcraft_frame::{AudioBuffer, VideoFrame};
+use filmcraft_media::{FrameRequest, MediaInfo, MediaSource, SharedSource};
+use filmcraft_project::{ItemId, Project, TrackItem};
+
+type SequenceId = ItemId;
+use filmcraft_time::Tick;
+
+/// Effects analysed in the background.
+pub const ANALYSED: [&str; 2] = ["warp_stabilizer", "auto_reframe"];
+
+/// Playback counts as running this long after its last frame.
+const PLAYING_GRACE: Duration = Duration::from_millis(600);
+
+/// A clip's analysis identity: what FilmCraft keys its caches on (the clip's media, place, length,
+/// source in, speed, direction) plus the effect and its analysis settings.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    item: u64,
+    start: i64,
+    duration: i64,
+    source_in: i64,
+    speed: u64,
+    reverse: bool,
+    effect: &'static str,
+    settings: String,
+}
+
+impl Key {
+    fn of(it: &TrackItem, effect: &'static str) -> Self {
+        let settings = it
+            .effects
+            .iter()
+            .find(|e| e.effect == effect)
+            .map(|e| ["method", "detailed", "preset"].iter().map(|p| format!("{:?}", e.params.get(*p).map(|x| &x.value))).collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
+        Self { item: it.item.0, start: it.start.0, duration: it.duration.0, source_in: it.source_in.0, speed: it.speed.to_bits(), reverse: it.reverse, effect, settings }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    Pending,
+    Done,
+    Failed,
+}
+
+struct Job {
+    key: Key,
+    project: Arc<Project>,
+    seq: SequenceId,
+    clip_start: Tick,
+    clip_end: Tick,
+    pool: Arc<filmcraft_engine::media_pool::MediaPool>,
+    services: Arc<dyn filmcraft_engine::Services>,
+}
+
+#[derive(Default)]
+pub struct Analyses {
+    state: Mutex<HashMap<Key, State>>,
+    /// Milliseconds since [`epoch`] of the last playback frame (0: none yet).
+    last_playback: AtomicU64,
+    worker: OnceLock<Mutex<Sender<Job>>>,
+}
+
+fn epoch() -> Instant {
+    static E: OnceLock<Instant> = OnceLock::new();
+    *E.get_or_init(Instant::now)
+}
+
+impl Analyses {
+    /// A playback frame is being rendered: the worker waits.
+    pub fn note_playback(&self) {
+        self.last_playback.store(epoch().elapsed().as_millis() as u64 + 1, Ordering::Relaxed);
+    }
+
+    pub fn playing(&self) -> bool {
+        let last = self.last_playback.load(Ordering::Relaxed);
+        last != 0 && epoch().elapsed().as_millis() as u64 + 1 - last < PLAYING_GRACE.as_millis() as u64
+    }
+
+    /// Clips whose analysis is not done yet, by clip id, with the effect (for the timeline).
+    pub fn pending(&self) -> usize {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner).values().filter(|s| **s == State::Pending).count()
+    }
+
+    /// `project` (a render snapshot) without the analysed effects of clips whose analysis is not
+    /// done, queueing their analysis. Unchanged (no copy) when every analysis is done.
+    pub fn strip_unready(
+        self: &Arc<Self>,
+        project: Arc<Project>,
+        seq: SequenceId,
+        pool: &Arc<filmcraft_engine::media_pool::MediaPool>,
+        services: &Arc<dyn filmcraft_engine::Services>,
+    ) -> Arc<Project> {
+        let Some(q) = project.sequence(seq) else { return project };
+        let mut unready: Vec<(u64, &'static str)> = Vec::new();
+        {
+            let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            for it in q.all_tracks().flat_map(|t| t.items.iter()) {
+                for effect in ANALYSED {
+                    if !it.effects.iter().any(|e| e.effect == effect && e.enabled) {
+                        continue;
+                    }
+                    let key = Key::of(it, effect);
+                    match st.get(&key) {
+                        Some(State::Done) => {}
+                        Some(State::Pending | State::Failed) => unready.push((it.id.0, effect)),
+                        None => {
+                            st.insert(key.clone(), State::Pending);
+                            unready.push((it.id.0, effect));
+                            if st.len() > 512 {
+                                st.retain(|_, s| *s == State::Pending);
+                            }
+                            self.queue(Job { key, project: project.clone(), seq, clip_start: it.start, clip_end: it.end(), pool: pool.clone(), services: services.clone() });
+                        }
+                    }
+                }
+            }
+        }
+        if unready.is_empty() {
+            return project;
+        }
+        let mut p = (*project).clone();
+        if let Some(q) = p.sequence_mut(seq) {
+            for t in q.all_tracks_mut() {
+                for it in &mut t.items {
+                    if unready.iter().any(|(c, _)| *c == it.id.0) {
+                        it.effects.retain(|e| !unready.iter().any(|(c, eff)| *c == it.id.0 && e.effect == *eff));
+                    }
+                }
+            }
+        }
+        Arc::new(p)
+    }
+
+    fn queue(self: &Arc<Self>, job: Job) {
+        let tx = self.worker.get_or_init(|| {
+            let (tx, rx) = channel::<Job>();
+            let me = Arc::downgrade(self);
+            let _ = std::thread::Builder::new().name("videolab-analysis".into()).spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let Some(me) = me.upgrade() else { break };
+                    let key = job.key.clone();
+                    let started = Instant::now();
+                    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.run(&job))).unwrap_or(false);
+                    log::info!("analysed {} for item {} in {:.1} s: {}", key.effect, key.item, started.elapsed().as_secs_f64(), if ok { "done" } else { "failed" });
+                    me.state.lock().unwrap_or_else(PoisonError::into_inner).insert(key, if ok { State::Done } else { State::Failed });
+                }
+            });
+            Mutex::new(tx)
+        });
+        let _ = tx.lock().unwrap_or_else(PoisonError::into_inner).send(job);
+    }
+
+    /// Render the clip as FilmCraft would, small, so its analysis lands in FilmCraft's caches.
+    fn run(self: &Arc<Self>, job: &Job) -> bool {
+        let Some(q) = job.project.sequence(job.seq) else { return false };
+        let long = q.settings.width.max(q.settings.height).max(1) as f32;
+        let opts = filmcraft_render::RenderOptions { scale: (160.0 / long).min(1.0), captions: false, ..Default::default() };
+        let inner = job.pool.full_res_provider(job.project.clone(), job.services.clone()).own_sources();
+        let gate = self.clone();
+        let provider = move |item: ItemId| -> Option<SharedSource> {
+            use filmcraft_render::SourceProvider;
+            inner.source(item).map(|s| Arc::new(Waiting { inner: s, gate: gate.clone() }) as SharedSource)
+        };
+        let frames: Vec<Tick> = match job.key.effect {
+            // the stabilizer analyses the whole clip for its first frame
+            "warp_stabilizer" => vec![Tick((job.clip_start.0 + job.clip_end.0) / 2)],
+            // reframing looks at the frames around each one: every frame fills its cache
+            _ => {
+                let fd = q.settings.frame_rate.frame_duration().0.max(1);
+                (job.clip_start.0..job.clip_end.0).step_by(fd as usize).map(Tick).collect()
+            }
+        };
+        filmcraft_media::cancel::with_background(true, || {
+            for t in frames {
+                let _ = filmcraft_render::render_sequence(&job.project, job.seq, t, opts, &provider);
+            }
+        });
+        true
+    }
+}
+
+/// A media source that holds each frame request while playback runs.
+struct Waiting {
+    inner: SharedSource,
+    gate: Arc<Analyses>,
+}
+
+impl Waiting {
+    fn wait(&self) {
+        while self.gate.playing() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl MediaSource for Waiting {
+    fn info(&self) -> &MediaInfo {
+        self.inner.info()
+    }
+    fn video_frame(&self, req: FrameRequest) -> filmcraft_media::Result<Arc<VideoFrame>> {
+        self.wait();
+        self.inner.video_frame(req)
+    }
+    fn video_frame_unturned(&self, req: FrameRequest) -> filmcraft_media::Result<(Arc<VideoFrame>, u8)> {
+        self.wait();
+        self.inner.video_frame_unturned(req)
+    }
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+        self.inner.audio(start, frames, sample_rate)
+    }
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<AudioBuffer> {
+        self.inner.audio_stream(stream, start, frames, sample_rate)
+    }
+}
