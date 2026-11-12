@@ -81,6 +81,19 @@ pub struct Analyses {
     /// Milliseconds since [`epoch`] of the last playback frame (0: none yet).
     last_playback: AtomicU64,
     worker: OnceLock<Mutex<Sender<Job>>>,
+    /// The last stripped copy: the project it came from, what was stripped, and the copy. Renders
+    /// reuse it while neither changes (playback renders 30+ frames a second; cloning the project
+    /// for each would cost exactly while playback must stay smooth). Holding the source `Arc`
+    /// also makes any edit copy the session's project (`Arc::make_mut`), so a changed project
+    /// never matches by pointer.
+    stripped: Mutex<Option<Stripped>>,
+}
+
+/// A stripped render snapshot and what it was made from.
+struct Stripped {
+    source: Arc<Project>,
+    unready: Vec<(u64, &'static str)>,
+    copy: Arc<Project>,
 }
 
 fn epoch() -> Instant {
@@ -146,7 +159,14 @@ impl Analyses {
             self.queue(job);
         }
         if unready.is_empty() {
+            *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = None;
             return project;
+        }
+        if let Some(c) = self.stripped.lock().unwrap_or_else(PoisonError::into_inner).as_ref()
+            && Arc::ptr_eq(&c.source, &project)
+            && c.unready == unready
+        {
+            return c.copy.clone();
         }
         let mut p = (*project).clone();
         if let Some(q) = p.sequence_mut(seq) {
@@ -158,7 +178,9 @@ impl Analyses {
                 }
             }
         }
-        Arc::new(p)
+        let copy = Arc::new(p);
+        *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = Some(Stripped { source: project, unready, copy: copy.clone() });
+        copy
     }
 
     fn queue(self: &Arc<Self>, job: Job) {

@@ -499,3 +499,28 @@ fn canvas_change_keeps_overlays() {
     let scale = call("clip.transform", json!({"clip": clip, "seconds": 1.5}))["scale"].as_f64().unwrap();
     assert!((scale - 40.0).abs() < 0.01, "the overlay keeps its size: {scale}");
 }
+
+#[test]
+fn stripped_project_is_reused_until_it_changes() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, _) = demo_clips(&lab);
+    lab.call("compose.stabilize", json!({"clips": [clip]}), Source::Agent).unwrap();
+    // Hold the worker (as playback does) so the analysis stays pending across the renders below.
+    lab.engine.analyses.note_playback();
+    let snap = |lab: &Lab| {
+        let g = lab.engine.lock();
+        let seq = g.state.active_sequence.unwrap();
+        lab.engine.analyses.strip_unready(g.project.clone(), seq, &g.media, &g.services)
+    };
+    let a = snap(&lab);
+    lab.engine.analyses.note_playback();
+    let b = snap(&lab);
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "the same stripped copy while nothing changed");
+    assert!(!a.sequence(lab.engine.lock().state.active_sequence.unwrap()).unwrap().all_tracks().flat_map(|t| t.items.iter()).any(|i| i.effects.iter().any(|e| e.effect == "warp_stabilizer")), "stripped");
+    // An edit: a new copy, with the edit in it.
+    lab.call("timeline.volume", json!({"clips": [clip], "db": -3}), Source::Agent).unwrap();
+    lab.engine.analyses.note_playback();
+    let c = snap(&lab);
+    assert!(!std::sync::Arc::ptr_eq(&b, &c), "an edit makes a new copy");
+}
