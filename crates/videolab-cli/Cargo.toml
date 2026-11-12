@@ -1,0 +1,18 @@
+[package]
+name = "videolab-cli"
+description = "videolab: VideoLab's registry from the shell (call/help/script) and its MCP + control-channel host off-device (serve-http)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "videolab"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+videolab-core = { workspace = true }
+serde_json = { workspace = true }

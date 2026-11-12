@@ -1,0 +1,15 @@
+[package]
+name = "lab-api"
+description = "The function registry every lab app surface dispatches through (effects, handles, events); engine-agnostic, lifted from ImageLab's imagelab-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

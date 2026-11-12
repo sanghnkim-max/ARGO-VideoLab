@@ -1,0 +1,21 @@
+[package]
+name = "lab-mcp"
+description = "MCP host for lab apps: lab_read/lab_script/lab_help over a lab-api registry, an in-process client, loopback streamable HTTP with bearer token; lifted from ImageLab's imagelab-core::mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lab-api = { workspace = true }
+lab-script = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

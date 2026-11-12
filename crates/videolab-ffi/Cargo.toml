@@ -1,0 +1,21 @@
+[package]
+name = "videolab-ffi"
+description = "VideoLab's core for Android: uniffi bindings (Kotlin) over videolab-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# cdylib: libvideolab_ffi.so in the APK. lib: for host tests.
+crate-type = ["cdylib", "lib"]
+name = "videolab_ffi"
+
+[lints]
+workspace = true
+
+[dependencies]
+videolab-core = { workspace = true }
+uniffi = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "lab-script"
+description = "The agent's JavaScript runtime over lab-api (rquickjs, a realm per program, budgets, read-only realms); lifted from ImageLab's imagelab-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lab-api = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+png = "0.18"
+# QuickJS (MIT). Plain synchronous runtime: registry calls are synchronous, so the program's
+# promises are driven by QuickJS's own job queue (`Promise::finish`), no async executor.
+rquickjs = { version = "0.14", default-features = false, features = ["std"] }
+
+# rquickjs-sys ships no pre-generated bindings for Android targets: generate them with bindgen
+# (needs a libclang; on macOS Xcode's is found automatically).
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "0.14", default-features = false, features = ["std", "bindgen"] }

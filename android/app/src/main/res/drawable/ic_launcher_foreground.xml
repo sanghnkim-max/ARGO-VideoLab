@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Original mark: a filmstrip frame with a play head. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="4"
+        android:pathData="M30,36h48v36h-48z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M34,30h4v4h-4zM46,30h4v4h-4zM58,30h4v4h-4zM70,30h4v4h-4zM34,74h4v4h-4zM46,74h4v4h-4zM58,74h4v4h-4zM70,74h4v4h-4z" />
+    <path android:fillColor="#FFF5A623" android:pathData="M48,44l14,10l-14,10z" />
+</vector>

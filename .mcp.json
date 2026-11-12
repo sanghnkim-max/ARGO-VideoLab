@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "videolab": {
+      "type": "http",
+      "url": "http://localhost:7700/mcp",
+      "headers": { "Authorization": "Bearer ${VIDEOLAB_MCP_TOKEN}" }
+    },
+    "filmcraft-on-phone": {
+      "type": "http",
+      "url": "http://localhost:7700/filmcraft/mcp",
+      "headers": { "Authorization": "Bearer ${VIDEOLAB_MCP_TOKEN}" }
+    }
+  }
+}

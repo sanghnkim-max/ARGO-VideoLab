@@ -1,0 +1,3 @@
+[bindings.kotlin]
+package_name = "dev.argo.videolab.core"
+cdylib_name = "videolab_ffi"

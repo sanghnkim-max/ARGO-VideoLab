@@ -1,0 +1,57 @@
+[package]
+name = "videolab-core"
+description = "VideoLab's core: one FilmCraft session shared by the app UI, the in-app agent, FilmCraft's MCP server and CLI (through its control channel), VideoLab's own MCP server and CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lab-api = { workspace = true }
+lab-script = { workspace = true }
+lab-mcp = { workspace = true }
+filmcraft-engine = { workspace = true }
+filmcraft-automation = { workspace = true }
+filmcraft-gpu = { workspace = true }
+filmcraft-export = { workspace = true }
+filmcraft-render = { workspace = true }
+filmcraft-project = { workspace = true }
+filmcraft-media = { workspace = true }
+filmcraft-time = { workspace = true }
+filmcraft-frame = { workspace = true }
+filmcraft-audio-dsp = { workspace = true }
+filmcraft-codecs = { workspace = true }
+filmcraft-isobmff = { workspace = true }
+filmcraft-platform = { workspace = true }
+filmcraft-color = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+getrandom = "0.4"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+# filmcraft-gpu builds wgpu with no backend; the host picks them (as FilmCraft's desktop app does).
+# Vulkan on Android (Vulkan 1.1 is guaranteed on 64-bit devices from API 29); Metal on macOS for
+# host tests. No GLES: on the emulator wgpu's GL fallback panics creating shader programs.
+[target.'cfg(target_os = "android")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan"] }
+# Hardware video decoding (MediaCodec, through the ndk crate's safe API) behind FilmCraft's
+# decoder seam (filmcraft_codecs::register_video_decoder), wrapped in filmcraft-platform's
+# HybridDecoder for the software fallback.
+ndk = { version = "0.9", default-features = false, features = ["media", "nativewindow", "api-level-33"] }
+android_logger = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["wgsl", "vulkan"] }
