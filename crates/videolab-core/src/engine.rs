@@ -193,11 +193,14 @@ impl Engine {
         if !info.has_video() {
             return Err(format!("item {item} has no picture"));
         }
+        // Colour-managed as the Program monitor is: HDR (PQ / HLG) media tone-mapped into SDR
+        // BT.709, so a phone's HDR clip does not come out washed white and colourless.
+        let project = self.lock().project.clone();
         let mut out = Vec::with_capacity(times.len());
         for &t in times {
             let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| src.video_frame(filmcraft_media::FrameRequest { time: t, scale: 0.25 })));
             let pic = match frame {
-                Ok(Ok(f)) => frame_rgba(&f, height),
+                Ok(Ok(f)) => frame_rgba(&project, ItemId(item), &f, height),
                 _ => None,
             };
             out.push(pic.unwrap_or_else(|| black(height * 16 / 9, height)));
@@ -317,16 +320,18 @@ fn black(width: u32, height: u32) -> Rgba {
 }
 
 /// A decoded frame as opaque sRGB RGBA8, scaled (box decimation, then nearest) to `height`.
-fn frame_rgba(f: &filmcraft_frame::VideoFrame, height: u32) -> Option<Rgba> {
+fn frame_rgba(project: &filmcraft_project::Project, item: ItemId, f: &filmcraft_frame::VideoFrame, height: u32) -> Option<Rgba> {
     if f.width == 0 || f.height == 0 {
         return None;
     }
     let n = (f.height / height.max(1)).clamp(1, 16) as usize;
-    let (w, h, px) = f.to_linear_f32_decimated(n);
+    let pipe = filmcraft_color::ColorPipeline::REC709;
+    let mut img = filmcraft_render::colorman::decode(project, item, f, n, &pipe);
+    filmcraft_render::colorman::to_display(&mut img, &pipe);
+    let (w, h) = (img.w, img.h);
     if w == 0 || h == 0 {
         return None;
     }
-    let img = filmcraft_render::Image { w, h, px };
     let full = img.over_black_rgba8();
     // Display aspect: pixel aspect ratio applied to the width.
     let (pn, pd) = (f.par.0.max(1), f.par.1.max(1));

@@ -467,3 +467,21 @@ fn interchange_exports() {
     }
     assert!(lab.call("export.interchange", json!({"format": "mov", "path": "exports/x.mov"}), Source::Ui).is_err());
 }
+
+#[test]
+#[ignore = "needs VIDEOLAB_HDR_CLIP: a 10-bit HDR phone clip"]
+fn hdr_thumbnails_have_colour() {
+    let Some(clip) = std::env::var_os("VIDEOLAB_HDR_CLIP") else { return };
+    let (d, lab) = lab();
+    std::fs::create_dir_all(d.path().join("media")).unwrap();
+    std::fs::copy(&clip, d.path().join("media/hdr.mp4")).unwrap();
+    let r = lab.call("media.import", json!({"paths": ["media/hdr.mp4"]}), Source::Ui).unwrap();
+    let item = r["items"][0].as_u64().or_else(|| r[0].as_u64()).unwrap_or_else(|| panic!("{r}"));
+    let thumbs = lab.engine.thumbnails(item, &[filmcraft_time::Tick::from_seconds_f64(1.0)], 360).unwrap();
+    let px = &thumbs[0].rgba;
+    let chroma: u64 = px.chunks(4).map(|p| (i32::from(p[0]) - i32::from(p[1])).unsigned_abs() as u64 + (i32::from(p[1]) - i32::from(p[2])).unsigned_abs() as u64).sum();
+    let mean = chroma as f64 / (px.len() / 4) as f64;
+    let png = lab_script::encode_png(thumbs[0].width, thumbs[0].height, lab_script::ColorType::Rgba, px).unwrap();
+    std::fs::write(std::env::temp_dir().join("hdr-thumb.png"), png).unwrap();
+    assert!(mean > 4.0, "thumbnail looks grey: mean |r-g|+|g-b| = {mean}");
+}

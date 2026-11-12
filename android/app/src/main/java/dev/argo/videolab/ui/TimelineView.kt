@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -203,17 +202,33 @@ fun TimelineView(
                     if (handle == null) {
                         // Long press: on a clip, drag it to move it (or let go in place for the quick
                         // menu); on empty space, the quick menu (paste).
-                        val long = awaitLongPressOrCancellation(down.id)
+                        // A long press only while the finger stays put: sliding past the touch slop
+                        // scrolls (or swipes) at once, a second finger zooms, lifting taps.
+                        var lastPos = down.position
+                        val held = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                            var stayed = true
+                            while (stayed) {
+                                val ev = awaitPointerEvent()
+                                val ch = ev.changes.firstOrNull { it.id == down.id }
+                                if (ev.changes.count { it.pressed } >= 2 || ch == null || !ch.pressed) stayed = false
+                                else {
+                                    lastPos = ch.position
+                                    if ((ch.position - down.position).getDistance() > slop) stayed = false
+                                }
+                            }
+                            false
+                        } == null
+                        val long = if (held) lastPos else null
                         if (long != null) {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             if (hit == null || hitRow == null) {
                                 while (currentEvent.changes.any { it.pressed }) awaitPointerEvent().changes.forEach { it.consume() }
-                                if (paste) menu = QuickMenu(null, max(0.0, tAtDown), long.position)
+                                if (paste) menu = QuickMenu(null, max(0.0, tAtDown), long)
                                 return@awaitEachGesture
                             }
                             onSelect(hit.id)
                             var start = hit.start
-                            var y = long.position.y
+                            var y = long.y
                             var travel = 0f
                             moving = ClipDrag(hit, hitRow.video, start, y, null)
                             // Edges it snaps to: the playhead, 0, and other clips' ends.
@@ -238,7 +253,7 @@ fun TimelineView(
                             moving = null
                             if (travel < slop) {
                                 // Held and let go in place: the quick menu.
-                                menu = QuickMenu(hit.id, tAtDown, long.position)
+                                menu = QuickMenu(hit.id, tAtDown, long)
                                 return@awaitEachGesture
                             }
                             if (m != null) {
@@ -307,14 +322,17 @@ fun TimelineView(
                             continue
                         }
                         val dx = ch.positionChange().x
-                        dxTotal += dx
-                        if (!moved && abs(dxTotal) > slop) moved = true
+                        // From where the finger went down: the wait for a long press saw the first
+                        // few pixels, and the scroll should not lose them.
+                        dxTotal = total.x
+                        val justMoved = !moved && abs(dxTotal) > slop
+                        if (justMoved) moved = true
                         if (moved) {
                             tracker.addPosition(ch.uptimeMillis, ch.position)
                             if (handle != null && sel != null) {
                                 trim = TrimDrag(sel!!, handle, dxTotal / pps.toDouble())
                             } else if (!zooming) {
-                                scrub = (scrub - dx / pps).coerceIn(0.0, max(0.0, tl.duration))
+                                scrub = (if (justMoved) t0 - dxTotal / pps else scrub - dx / pps).coerceIn(0.0, max(0.0, tl.duration))
                                 onScrub(scrub)
                             }
                             ch.consume()

@@ -39,6 +39,9 @@ const COLOR_FORMAT_YUV420_FLEXIBLE: i32 = 0x7F42_0888;
 /// interleaved. Used only when the format has no `image-data`; then a flexible format is taken as
 /// NV12 (what hardware decoders produce) and anything else as I420.
 const SEMI_PLANAR: [i32; 2] = [21, 0x7FA3_0C00];
+/// `COLOR_FormatYUVP010`: 10-bit 4:2:0, Y then interleaved CbCr, each sample a little-endian
+/// 16-bit word with the value in its top 10 bits. What 10-bit (HDR) streams decode to.
+const P010: i32 = 54;
 /// Offset added to pts so MediaCodec's unsigned microsecond timestamps carry negative pts too.
 const PTS_OFFSET: i64 = 1 << 40;
 /// Inputs in flight before decode() waits for a picture (bounds latency and memory).
@@ -142,11 +145,16 @@ pub struct MediaCodecDecoder {
     need_config: bool,
 }
 
+/// Per plane (Y, Cb, Cr): byte offset, step between samples, step between rows.
+type Planes = [(usize, usize, usize); 3];
+
 /// An output buffer's picture layout: per plane (Y, Cb, Cr) the byte offset, the step between
 /// samples and the step between rows, plus the visible rectangle.
 #[derive(Clone, Copy, Debug)]
 struct Layout {
-    planes: [(usize, usize, usize); 3],
+    planes: Planes,
+    /// Significant bits per sample: 8 (one byte each) or 10 (P010: 16-bit words, MSB-aligned).
+    bits: u32,
     /// Visible picture: x, y, width, height.
     crop: (usize, usize, usize, usize),
 }
@@ -158,19 +166,31 @@ impl Layout {
         let get = |k: &str| f.i32(k).and_then(|v| usize::try_from(v).ok());
         let width = get("width")?;
         let height = get("height")?;
-        let planes = match f.buffer("image-data").and_then(media_image_planes) {
+        let deep = info.bit_depth_luma > 8;
+        let (planes, bits) = match f.buffer("image-data").and_then(media_image_planes) {
             Some(p) => p,
+            None if deep || f.i32("color-format") == Some(P010) => {
+                // P010: strides in bytes, two per sample
+                let s = get("stride").filter(|s| *s >= width * 2).unwrap_or(width * 2);
+                let sh = get("slice-height").filter(|v| *v >= height).unwrap_or(height);
+                ([(0, 2, s), (s * sh, 4, s), (s * sh + 2, 4, s)], 10)
+            }
             None => {
                 let s = get("stride").filter(|s| *s >= width).unwrap_or(width);
                 let sh = get("slice-height").filter(|v| *v >= height).unwrap_or(height);
-                if SEMI_PLANAR.contains(&f.i32("color-format").unwrap_or(21)) || f.i32("color-format") == Some(COLOR_FORMAT_YUV420_FLEXIBLE) {
+                let planes = if SEMI_PLANAR.contains(&f.i32("color-format").unwrap_or(21)) || f.i32("color-format") == Some(COLOR_FORMAT_YUV420_FLEXIBLE) {
                     [(0, 1, s), (s * sh, 2, s), (s * sh + 1, 2, s)]
                 } else {
                     let (cs, csh) = (s.div_ceil(2), sh.div_ceil(2));
                     [(0, 1, s), (s * sh, 1, cs), (s * sh + cs * csh, 1, cs)]
-                }
+                };
+                (planes, 8)
             }
         };
+        if deep != (bits > 8) {
+            log::warn!("decoder output is {bits}-bit for a {}-bit stream", info.bit_depth_luma);
+            return None;
+        }
         let crop = match f.rect("crop") {
             Some((l, t, r, b)) if r >= l && b >= t => (l as usize, t as usize, (r - l + 1) as usize, (b - t + 1) as usize),
             _ => {
@@ -181,7 +201,7 @@ impl Layout {
         let (x, y) = (crop.0 & !1, crop.1 & !1);
         let w = crop.2.min(width.saturating_sub(x)) & !1;
         let h = crop.3.min(height.saturating_sub(y)) & !1;
-        (w > 0 && h > 0).then_some(Self { planes, crop: (x, y, w, h) })
+        (w > 0 && h > 0).then_some(Self { planes, bits, crop: (x, y, w, h) })
     }
 
     /// One picture as planar 8-bit 4:2:0 planes, cropped. `None` if `data` is too short.
@@ -224,15 +244,64 @@ impl Layout {
         }
         Some([luma, plane(1, cx, cy, cw, ch)?, plane(2, cx, cy, cw, ch)?])
     }
+
+    /// One 10-bit picture (P010 words) as planar 16-bit 4:2:0 planes holding 10-bit values, cropped.
+    fn copy16(&self, data: &[u8]) -> Option<[Vec<u16>; 3]> {
+        let (x, y, w, h) = self.crop;
+        let plane = |i: usize, x0: usize, y0: usize, w: usize, h: usize| -> Option<Vec<u16>> {
+            let (base, step, stride) = self.planes[i];
+            let mut out = vec![0u16; w * h];
+            for r in 0..h {
+                let at = base + (y0 + r) * stride + x0 * step;
+                let src = data.get(at..at + (w - 1) * step + 2)?;
+                for (k, d) in out[r * w..(r + 1) * w].iter_mut().enumerate() {
+                    *d = u16::from_le_bytes([src[k * step], src[k * step + 1]]) >> 6;
+                }
+            }
+            Some(out)
+        };
+        let (cx, cy, cw, ch) = (x / 2, y / 2, w / 2, h / 2);
+        let (yb, ys, yr) = self.planes[0];
+        let ((ub, us, ur), (vb, vs, vr)) = (self.planes[1], self.planes[2]);
+        if ys == 2 && us == 4 && vs == 4 && ur == vr && vb == ub + 2 {
+            // P010 (what hardware decoders give): whole rows of words at a time.
+            let mut luma = vec![0u16; w * h];
+            for r in 0..h {
+                let at = yb + (y + r) * yr + x * 2;
+                let row = data.get(at..at + w * 2)?;
+                for (d, px) in luma[r * w..(r + 1) * w].iter_mut().zip(row.as_chunks::<2>().0) {
+                    *d = u16::from_le_bytes(*px) >> 6;
+                }
+            }
+            let mut u = vec![0u16; cw * ch];
+            let mut v = vec![0u16; cw * ch];
+            for r in 0..ch {
+                let at = ub + (cy + r) * ur + cx * 4;
+                let row = data.get(at..at + cw * 4)?;
+                let (du, dv) = (&mut u[r * cw..(r + 1) * cw], &mut v[r * cw..(r + 1) * cw]);
+                for ((pu, pv), q) in du.iter_mut().zip(dv.iter_mut()).zip(row.as_chunks::<4>().0) {
+                    *pu = u16::from_le_bytes([q[0], q[1]]) >> 6;
+                    *pv = u16::from_le_bytes([q[2], q[3]]) >> 6;
+                }
+            }
+            return Some([luma, u, v]);
+        }
+        Some([plane(0, x, y, w, h)?, plane(1, cx, cy, cw, ch)?, plane(2, cx, cy, cw, ch)?])
+    }
 }
 
-/// The Y, Cb, Cr planes of a `MediaImage2` (8-bit YUV 4:2:0 only): offset, column and row
-/// increments. Layout (native-endian 32-bit fields): type, numPlanes, width, height, bitDepth,
+/// The Y, Cb, Cr planes of a `MediaImage2` (YUV 4:2:0, 8-bit, or 10-bit in 16-bit words): offset,
+/// column and row increments in bytes, and the significant bits. Layout (native-endian 32-bit fields): type, numPlanes, width, height, bitDepth,
 /// bitDepthAllocated, then per plane offset, colInc, rowInc, horizSubsampling, vertSubsampling.
-fn media_image_planes(b: &[u8]) -> Option<[(usize, usize, usize); 3]> {
+fn media_image_planes(b: &[u8]) -> Option<(Planes, u32)> {
     let word = |i: usize| -> Option<u32> { Some(u32::from_ne_bytes(b.get(i * 4..i * 4 + 4)?.try_into().ok()?)) };
     const YUV: u32 = 1;
-    if word(0)? != YUV || word(1)? < 3 || word(4)? != 8 || word(5)? != 8 {
+    let bits = match (word(4)?, word(5)?) {
+        (8, 8) => 8,
+        (10, 16) => 10,
+        _ => return None,
+    };
+    if word(0)? != YUV || word(1)? < 3 {
         return None;
     }
     let plane = |p: usize| -> Option<(usize, usize, usize)> {
@@ -241,13 +310,14 @@ fn media_image_planes(b: &[u8]) -> Option<[(usize, usize, usize); 3]> {
         let want = if p == 0 { 1 } else { 2 };
         (hs == want && vs == want && col > 0 && row > 0).then_some((offset as usize, col as usize, row as usize))
     };
-    Some([plane(0)?, plane(1)?, plane(2)?])
+    Some(([plane(0)?, plane(1)?, plane(2)?], bits))
 }
 
 impl MediaCodecDecoder {
     pub fn new(info: NalStreamInfo) -> std::result::Result<Self, String> {
-        if info.chroma_format_idc != 1 || info.bit_depth_luma != 8 || info.bit_depth_chroma != 8 {
-            return Err("only 8-bit 4:2:0 is decoded in hardware here".into());
+        let deep = info.bit_depth_luma == 10 && info.bit_depth_chroma == 10;
+        if info.chroma_format_idc != 1 || !(deep || (info.bit_depth_luma == 8 && info.bit_depth_chroma == 8)) {
+            return Err("only 8- and 10-bit 4:2:0 are decoded in hardware here".into());
         }
         if info.interlaced {
             return Err("interlaced streams keep the software decoder".into());
@@ -268,8 +338,9 @@ impl MediaCodecDecoder {
         fmt.set_i32("low-latency", 1);
         fmt.set_i32("priority", 0);
         fmt.set_i32("operating-rate", 120);
-        // Decoded pictures in ByteBuffers the app can read (see the module docs for why not a surface).
-        fmt.set_i32("color-format", COLOR_FORMAT_YUV420_FLEXIBLE);
+        // Decoded pictures in ByteBuffers the app can read (see the module docs for why not a
+        // surface): 4:2:0 at 8 bits, P010 for 10-bit (HDR) streams.
+        fmt.set_i32("color-format", if deep { P010 } else { COLOR_FORMAT_YUV420_FLEXIBLE });
         // Parameter sets go in-band, as the first (codec-config) input buffer, not as csd-* in the
         // format: on some devices the format's csd travels through a shared-memory queue the codec
         // service may not open ("queueCSDInputBuffer failed w/ error 14" on the emulator).
@@ -277,6 +348,15 @@ impl MediaCodecDecoder {
         codec.start().map_err(|e| format!("start: {e:?}"))?;
         log::info!("started {name} {w}x{h} (buffer output)");
         Ok(Self { codec, info, in_flight: 0, layout: None, ready: BTreeMap::new(), name: format!("MediaCodec ({name})"), fed: false, need_config: true })
+    }
+
+    /// This device's MediaCodec does not work for us: later streams go straight to software. Only
+    /// 8-bit streams decide that; a 10-bit (HDR) stream that fails falls back alone, as decoders
+    /// that handle 8-bit well can still lack (or mis-describe) a readable 10-bit output.
+    fn latch_broken(&self) {
+        if self.info.bit_depth_luma <= 8 {
+            BROKEN.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Length-prefixed NAL units → Annex-B with 4-byte start codes.
@@ -313,7 +393,7 @@ impl MediaCodecDecoder {
                     let time = u64::try_from(pts.saturating_add(PTS_OFFSET)).unwrap_or(0);
                     if let Err(e) = self.codec.queue_input_buffer(buf, 0, data.len(), time, flags) {
                         if !WORKED.load(Ordering::Relaxed) {
-                            BROKEN.store(true, Ordering::Relaxed);
+                            self.latch_broken();
                         }
                         return Err(err(e));
                     }
@@ -330,7 +410,7 @@ impl MediaCodecDecoder {
             }
         }
         if !WORKED.load(Ordering::Relaxed) {
-            BROKEN.store(true, Ordering::Relaxed);
+            self.latch_broken();
             log::warn!("MediaCodec produced no picture; hardware decoding is off for this run");
         }
         Err(CodecError::Decode("MediaCodec gave no input buffer".into()))
@@ -361,7 +441,7 @@ impl MediaCodecDecoder {
                             // A picture we cannot read: hand the stream to the software decoder now
                             // (the hybrid decoder replays it) rather than dropping frames.
                             if !WORKED.load(Ordering::Relaxed) {
-                                BROKEN.store(true, Ordering::Relaxed);
+                                self.latch_broken();
                             }
                             return Err(CodecError::Decode("MediaCodec picture could not be read".into()));
                         }
@@ -402,14 +482,20 @@ impl MediaCodecDecoder {
         let data = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| buf.buffer())).ok()?;
         let start = usize::try_from(info.offset()).ok()?;
         let len = usize::try_from(info.size()).ok()?;
-        let Some([y, u, v]) = data.get(start..start.saturating_add(len)).and_then(|d| layout.copy(d)) else {
+        let bytes = data.get(start..start.saturating_add(len))?;
+        let pixels = if layout.bits > 8 {
+            layout.copy16(bytes).map(|[y, u, v]| PixelData::Yuv16 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: layout.bits, alpha: None })
+        } else {
+            layout.copy(bytes).map(|[y, u, v]| PixelData::Yuv8 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None })
+        };
+        let Some(pixels) = pixels else {
             log::warn!("{}: picture of {len} bytes does not fit {layout:?}", self.name);
             return None;
         };
         Some(VideoFrame {
             width: layout.crop.2 as u32,
             height: layout.crop.3 as u32,
-            data: PixelData::Yuv8 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None },
+            data: pixels,
             color: self.info.color,
             par: self.info.par,
             pts: filmcraft_time::Tick(0),
