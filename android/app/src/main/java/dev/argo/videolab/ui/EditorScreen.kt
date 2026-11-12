@@ -96,9 +96,26 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
     }
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> if (uris.isNotEmpty()) onImport(uris, true) }
 
+    // A scrub's position is shown until the timeline's own playhead (re-read on the next refresh,
+    // a moment after the seek) has caught up: clearing it at once drew the old position for a
+    // frame or two, so the playhead flickered back.
+    var seekTo by remember { mutableStateOf<Double?>(null) }
     fun commitSeek(t: Double) = scope.launch {
+        seekTo = t
         lab.exec("playhead.set", """{"seconds":$t}""")
-        scrub = null
+    }
+    LaunchedEffect(seekTo, timeline?.playhead) {
+        val want = seekTo ?: return@LaunchedEffect
+        val frame = 1.0 / (timeline?.fps ?: 30.0).coerceAtLeast(1.0)
+        if (timeline != null && kotlin.math.abs(timeline.playhead - want) <= frame) {
+            scrub = null
+            seekTo = null
+        } else {
+            // never leave the playhead pinned if the seek failed or was overridden
+            kotlinx.coroutines.delay(1500)
+            scrub = null
+            seekTo = null
+        }
     }
 
     suspend fun save() {
@@ -345,6 +362,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             modifier = Modifier.fillMaxWidth().height(if (tool != null) 168.dp else 232.dp),
                             onScrub = { t ->
                                 if (playing) player.stop()
+                                seekTo = null // a new scrub replaces a seek still landing
                                 scrub = t
                                 lab.requestFrame(t)
                             },
