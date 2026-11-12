@@ -353,7 +353,7 @@ fun TimelineView(
                             if (d != null && abs(d.delta) > 0.01) onTrim(d.clip, d.edge, d.delta)
                         }
                         // Two fingers down and up without pinching or sliding: undo.
-                        zooming && fingers >= 2 && spanChange < slop * 2 && !moved && (currentEvent.changes.firstOrNull()?.uptimeMillis ?: down.uptimeMillis) - down.uptimeMillis < 400 -> {
+                        zooming && fingers >= 2 && spanChange < slop && !moved && (currentEvent.changes.firstOrNull()?.uptimeMillis ?: down.uptimeMillis) - down.uptimeMillis < 300 -> {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             onUndo()
                         }

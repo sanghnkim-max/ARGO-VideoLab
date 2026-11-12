@@ -35,9 +35,11 @@ object Imports {
                     c.getString(0)
                 } else null
             } ?: "media.mp4"
-            // A copy made earlier: reuse it.
+            // A copy made earlier of the same file: reuse it (same name, size and first bytes).
             val earlier = File(workspace, "media/$name")
-            if (size > 0 && earlier.isFile && earlier.length() == size) return@runCatching lab.call { it.importFile("media/$name") }.getOrThrow()
+            if (size > 0 && earlier.isFile && earlier.length() == size && sameStart(resolver.openInputStream(uri), earlier)) {
+                return@runCatching lab.call { it.importFile("media/$name") }.getOrThrow()
+            }
             val target = lab.io { it.mediaTarget(name) }.getOrThrow()
             val file = File(workspace, target)
             file.parentFile?.mkdirs()
@@ -45,6 +47,16 @@ object Imports {
             lab.call { it.importFile(target) }.getOrThrow()
         }
     }
+
+    /** Whether [picked] starts with the same 1 MiB as [file] (closes the stream). */
+    private fun sameStart(picked: java.io.InputStream?, file: File): Boolean = runCatching {
+        picked?.use { a ->
+            file.inputStream().use { b ->
+                val n = 1 shl 20
+                a.readNBytes(n).contentEquals(b.readNBytes(n))
+            }
+        } ?: false
+    }.getOrDefault(false)
 
     /** The picked file's real path on shared storage, when this app can read it there. */
     fun localPath(context: Context, uri: Uri): String? {

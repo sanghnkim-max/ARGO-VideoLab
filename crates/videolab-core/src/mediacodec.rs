@@ -169,7 +169,9 @@ impl Layout {
         let deep = info.bit_depth_luma > 8;
         let (planes, bits) = match f.buffer("image-data").and_then(media_image_planes) {
             Some(p) => p,
-            None if deep || f.i32("color-format") == Some(P010) => {
+            // Without image-data, only a format that says P010 is read as P010: a vendor 10-bit
+            // layout (packed, tiled) read that way would be noise, so it goes to software.
+            None if f.i32("color-format") == Some(P010) => {
                 // P010: strides in bytes, two per sample
                 let s = get("stride").filter(|s| *s >= width * 2).unwrap_or(width * 2);
                 let sh = get("slice-height").filter(|v| *v >= height).unwrap_or(height);

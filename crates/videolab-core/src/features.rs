@@ -1195,7 +1195,7 @@ fn register_project(r: &mut Registry) {
         #[serde(default)]
         fit: Option<bool>,
     }
-    r.function("project", "setCanvas", "Change the canvas to an aspect ratio (9:16, 16:9, 1:1, 4:5, 4:3, 3:4, 21:9), keeping its long side; clips are fitted to the new frame unless fit=false")
+    r.function("project", "setCanvas", "Change the canvas to an aspect ratio (9:16, 16:9, 1:1, 4:5, 4:3, 3:4, 21:9), keeping its long side; the main track's clips are fitted to the new frame unless fit=false (titles and overlays keep their layout)")
         .params(json!({"type": "object", "properties": {"ratio": {"type": "string"}, "fit": {"type": "boolean"}}, "required": ["ratio"]}))
         .effects(Effects::Revertible)
         .typed(|ctx, p: Canvas| {
@@ -1208,10 +1208,14 @@ fn register_project(r: &mut Registry) {
             let (w, h) = if a >= b { (long, even(f64::from(long) * f64::from(b) / f64::from(a))) } else { (even(f64::from(long) * f64::from(a) / f64::from(b)), long) };
             run(ctx, "sequence.settings", json!({"width": w, "height": h}))?;
             if p.fit != Some(false) {
-                let seq = run(ctx, "sequence.inspect", json!({}))?;
-                let clips: Vec<u64> = seq["video"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().flat_map(|t| t["items"].as_array().cloned().unwrap_or_default()).filter(|c| c["kind"] != "graphic").filter_map(|c| c["clip"].as_u64()).collect();
+                // The main track's footage fits the new frame; titles and overlays (the tracks
+                // above) keep the size and place the person gave them.
+                let clips: Vec<u64> = {
+                    let s = engine(ctx)?.lock();
+                    let q = s.state.active_sequence.and_then(|id| s.project.sequence(id));
+                    q.and_then(|q| q.video_tracks.first()).map(|t| t.items.iter().map(|i| i.id.0).collect()).unwrap_or_default()
+                };
                 if !clips.is_empty() {
-                    // Titles and graphics keep their layout; footage and stills fit the new frame.
                     let _ = run(ctx, "clip.fitToFrame", json!({"clips": clips}));
                 }
             }

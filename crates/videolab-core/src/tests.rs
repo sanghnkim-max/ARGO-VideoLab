@@ -485,3 +485,17 @@ fn hdr_thumbnails_have_colour() {
     std::fs::write(std::env::temp_dir().join("hdr-thumb.png"), png).unwrap();
     assert!(mean > 4.0, "thumbnail looks grey: mean |r-g|+|g-b| = {mean}");
 }
+
+#[test]
+fn canvas_change_keeps_overlays() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let video = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().filter(|t| t["kind"] == "video").cloned().collect::<Vec<_>>();
+    let clip = video(&lab)[0]["clips"][1]["clip"].as_u64().unwrap();
+    call("timeline.move", json!({"clip": clip, "seconds": 1.0, "track": "new"}));
+    call("clip.setTransform", json!({"clip": clip, "scale": 40, "seconds": 1.5}));
+    call("project.setCanvas", json!({"ratio": "1:1"}));
+    let scale = call("clip.transform", json!({"clip": clip, "seconds": 1.5}))["scale"].as_f64().unwrap();
+    assert!((scale - 40.0).abs() < 0.01, "the overlay keeps its size: {scale}");
+}

@@ -99,8 +99,12 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
         val name = (timeline?.name ?: "Untitled").replace(Regex("[^A-Za-z0-9 _-]"), "_").trim().ifEmpty { "Untitled" }
         val r = lab.fn("doc.save")
         if (r.isFailure) {
+            // Never saved: a free name in projects/, so another project with the same title
+            // (every new one is "My video") is not overwritten.
             lab.clearMessage()
-            lab.fn("doc.save", """{"path":"projects/$name.fcproj"}""")
+            val dir = java.io.File(app.workspace, "projects")
+            val file = generateSequence(1) { it + 1 }.map { n -> if (n == 1) "$name.fcproj" else "$name ($n).fcproj" }.first { !java.io.File(dir, it).exists() }
+            lab.fn("doc.save", """{"path":"projects/$file"}""")
         }
     }
 

@@ -99,7 +99,7 @@ impl Analyses {
         last != 0 && epoch().elapsed().as_millis() as u64 + 1 - last < PLAYING_GRACE.as_millis() as u64
     }
 
-    /// Clips whose analysis is not done yet, by clip id, with the effect (for the timeline).
+    /// How many analyses are queued or running.
     pub fn pending(&self) -> usize {
         self.state.lock().unwrap_or_else(PoisonError::into_inner).values().filter(|s| **s == State::Pending).count()
     }
@@ -115,6 +115,7 @@ impl Analyses {
     ) -> Arc<Project> {
         let Some(q) = project.sequence(seq) else { return project };
         let mut unready: Vec<(u64, &'static str)> = Vec::new();
+        let mut jobs = Vec::new();
         {
             let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             for it in q.all_tracks().flat_map(|t| t.items.iter()) {
@@ -124,19 +125,25 @@ impl Analyses {
                     }
                     let key = Key::of(it, effect);
                     match st.get(&key) {
-                        Some(State::Done) => {}
-                        Some(State::Pending | State::Failed) => unready.push((it.id.0, effect)),
+                        // Failed: draw it as FilmCraft would (analysing inline), so the preview
+                        // matches the export rather than hiding the effect for the session.
+                        Some(State::Done | State::Failed) => {}
+                        Some(State::Pending) => unready.push((it.id.0, effect)),
                         None => {
                             st.insert(key.clone(), State::Pending);
                             unready.push((it.id.0, effect));
                             if st.len() > 512 {
                                 st.retain(|_, s| *s == State::Pending);
                             }
-                            self.queue(Job { key, project: project.clone(), seq, clip_start: it.start, clip_end: it.end(), pool: pool.clone(), services: services.clone() });
+                            jobs.push(Job { key, project: project.clone(), seq, clip_start: it.start, clip_end: it.end(), pool: pool.clone(), services: services.clone() });
                         }
                     }
                 }
             }
+        }
+        // Queued with the state unlocked: a job that cannot be queued is marked failed.
+        for job in jobs {
+            self.queue(job);
         }
         if unready.is_empty() {
             return project;
@@ -170,7 +177,11 @@ impl Analyses {
             });
             Mutex::new(tx)
         });
-        let _ = tx.lock().unwrap_or_else(PoisonError::into_inner).send(job);
+        // No worker (its thread could not start): the job cannot run, so it is not waited for.
+        if let Err(std::sync::mpsc::SendError(job)) = tx.lock().unwrap_or_else(PoisonError::into_inner).send(job) {
+            log::warn!("analysis worker unavailable: {} drawn as FilmCraft does", job.key.effect);
+            self.state.lock().unwrap_or_else(PoisonError::into_inner).insert(job.key, State::Failed);
+        }
     }
 
     /// Render the clip as FilmCraft would, small, so its analysis lands in FilmCraft's caches.
