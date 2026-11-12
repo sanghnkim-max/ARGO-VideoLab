@@ -102,7 +102,8 @@ cargo run -p videolab-cli -- script cut.js --root ./workspace --out-dir out/
   redo), and a phone timeline with a fixed centre playhead: drag to scrub, pinch to zoom, tap to
   select, drag handles to trim, long-press to move, **swipe down on a clip to split**, tap the
   selected clip (or long-press and let go) for **Split / Cut / Copy / Paste / Duplicate / Delete**,
-  two-finger tap to undo. Tools are in two levels, as in CapCut:
+  two-finger tap to undo; transitions show on their cut with type and length, and tapping one
+  changes its type or length or removes it. Tools are in two levels, as in CapCut:
   * nothing selected: **Edit** (media, split all, close gaps), **Audio** (music, text to speech),
     **Text** (text, templates, captions with **auto captions** and pause / “um” removal),
     **Effects** (effects, filters, adjust), **Canvas** (9:16, 16:9, 1:1, 4:5…), **Agent**;

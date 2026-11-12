@@ -524,3 +524,31 @@ fn stripped_project_is_reused_until_it_changes() {
     let c = snap(&lab);
     assert!(!std::sync::Arc::ptr_eq(&b, &c), "an edit makes a new copy");
 }
+
+#[test]
+fn transitions_show_and_change() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let v1 = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().find(|t| t["kind"] == "video").unwrap().clone();
+    let clip = v1(&lab)["clips"][1]["clip"].as_u64().unwrap();
+    for t in v1(&lab)["transitions"].as_array().unwrap().clone() {
+        call("timeline.removeTransition", json!({"transition": t["id"]}));
+    }
+    assert!(v1(&lab)["transitions"].as_array().unwrap().is_empty());
+    call("timeline.transition", json!({"clip": clip, "effect": "cross_dissolve", "edge": "in", "seconds": 0.5}));
+    let t = v1(&lab)["transitions"][0].clone();
+    assert_eq!(t["name"], "Cross Dissolve", "{t}");
+    assert!((t["duration"].as_f64().unwrap() - 0.5).abs() < 0.05, "{t}");
+    assert_eq!(t["to"], json!(clip), "{t}");
+    call("timeline.setTransition", json!({"transition": t["id"], "seconds": 1.2}));
+    let t2 = v1(&lab)["transitions"][0].clone();
+    assert!((t2["duration"].as_f64().unwrap() - 1.2).abs() < 0.05, "{t2}");
+    // Another type on the same edge replaces it.
+    call("timeline.transition", json!({"clip": clip, "effect": "dip_to_black", "edge": "in", "seconds": 1.2}));
+    let ts = v1(&lab)["transitions"].as_array().unwrap().clone();
+    assert_eq!(ts.len(), 1, "replaced, not stacked: {ts:?}");
+    assert_eq!(ts[0]["effect"], "dip_to_black");
+    call("timeline.removeTransition", json!({"transition": ts[0]["id"]}));
+    assert!(v1(&lab)["transitions"].as_array().unwrap().is_empty());
+}

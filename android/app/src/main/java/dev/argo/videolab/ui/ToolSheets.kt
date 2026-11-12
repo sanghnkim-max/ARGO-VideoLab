@@ -1,5 +1,9 @@
 package dev.argo.videolab.ui
 
+import androidx.compose.foundation.layout.width
+
+import androidx.compose.runtime.collectAsState
+
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.util.Base64
@@ -70,14 +74,14 @@ import kotlin.math.roundToInt
 private fun q(s: String) = JsonPrimitive(s).toString()
 
 @Composable
-fun ToolSheet(app: VideoLabApp, tool: Tool, clip: Clip?, playhead: Double, onDone: () -> Unit) {
+fun ToolSheet(app: VideoLabApp, tool: Tool, clip: Clip?, playhead: Double, onDone: () -> Unit, transition: Long? = null) {
     // At most ~a third of a phone screen, scrolling: the preview stays big enough to judge a look.
     Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).background(Color(0xFF151518)).verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
         when (tool) {
             Tool.Volume -> clip?.let { VolumeSheet(app, it, onDone) }
             Tool.Speed -> clip?.let { SpeedSheet(app, it, onDone) }
             Tool.Fade -> clip?.let { FadeSheet(app, it, onDone) }
-            Tool.Transition -> clip?.let { TransitionSheet(app, it, onDone) }
+            Tool.Transition -> TransitionSheet(app, clip, transition, onDone)
             Tool.Text -> TextSheet(app, playhead, onDone)
             Tool.Templates -> TemplatesSheet(app, playhead, onDone)
             Tool.Captions -> CaptionSheet(app, playhead, onDone)
@@ -153,23 +157,58 @@ private fun FadeSheet(app: VideoLabApp, clip: Clip, onDone: () -> Unit) {
     }, modifier = Modifier.padding(horizontal = 16.dp))
 }
 
+/**
+ * A transition: its type (tap another to replace it), length and Remove. Opened on a transition
+ * tapped in the timeline ([transitionId]), or from a clip's Transition button: the cut into it.
+ */
 @Composable
-private fun TransitionSheet(app: VideoLabApp, clip: Clip, onDone: () -> Unit) {
+private fun TransitionSheet(app: VideoLabApp, clip: Clip?, transitionId: Long?, onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val state by app.lab.state.collectAsState()
     var all by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     LaunchedEffect(Unit) {
         val list = app.lab.io { it.execute("effects.list", """{"kind":"VideoTransition"}""") }.getOrNull()?.let(app.lab::parse) as? JsonArray
         all = list.orEmpty().mapNotNull { it as? JsonObject }.mapNotNull { o -> o.s("id")?.let { id -> id to (o.s("name") ?: id) } }
     }
+    // Which cut this sheet edits: the tapped transition's, else the cut into the clip. Kept by its
+    // clip and edge, so it follows the transition when a new type replaces it (a new id).
+    val anchor = remember(transitionId, clip?.id) {
+        val t = transitionId?.let { id -> state.timeline?.tracks?.flatMap { it.transitions }?.firstOrNull { it.id == id } }
+        when {
+            t?.to != null -> t.to to "in"
+            t?.from != null -> t.from to "out"
+            clip != null -> clip.id to "in"
+            else -> null
+        }
+    }
+    val current = anchor?.let { (c, edge) -> state.timeline?.tracks?.flatMap { it.transitions }?.firstOrNull { if (edge == "in") it.to == c else it.from == c && it.to == null } }
+    var seconds by remember(current?.id) { mutableFloatStateOf((current?.duration ?: 0.6).toFloat()) }
     val common = listOf("cross_dissolve", "dip_to_black", "dip_to_white", "push", "slide", "wipe", "zoom", "iris_round", "film_dissolve", "cube_spin", "page_peel")
     val shown = all.sortedBy { (id, _) -> common.indexOf(id).let { if (it < 0) 999 else it } }.take(40)
-    SheetHeader("Transition into this clip", onDone)
+    SheetHeader(current?.let { "Transition · ${it.name} · ${"%.1f".format(it.duration)} s" } ?: "Add a transition", onDone)
+    if (anchor == null) {
+        Text("Select a clip, or tap a transition on the timeline.", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
+        return
+    }
     Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         shown.forEach { (id, name) ->
-            FilterChip(selected = false, onClick = {
-                scope.launch { app.lab.fn("timeline.transition", """{"clip":${clip.id},"effect":${q(id)},"edge":"in","seconds":0.6}""") }
+            FilterChip(selected = current?.effect == id, onClick = {
+                scope.launch { app.lab.fn("timeline.transition", """{"clip":${anchor.first},"effect":${q(id)},"edge":"${anchor.second}","seconds":$seconds}""") }
             }, label = { Text(name) })
         }
+    }
+    if (current != null) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Length ${"%.1f".format(seconds)} s", fontSize = 12.sp, modifier = Modifier.width(96.dp))
+            Slider(seconds, { seconds = it }, valueRange = 0.1f..2.5f, onValueChangeFinished = {
+                scope.launch { app.lab.fn("timeline.setTransition", """{"transition":${current.id},"seconds":$seconds}""") }
+            }, modifier = Modifier.weight(1f))
+        }
+        TextButton(onClick = { scope.launch { app.lab.fn("timeline.removeTransition", """{"transition":${current.id}}"""); onDone() } }, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text("Remove transition")
+        }
+    } else {
+        Text("Tap a type to add it on the cut into this clip.", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
     }
 }
 

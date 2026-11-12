@@ -29,7 +29,8 @@ return { name: t.name, duration: t.duration, look };   // {image} objects come b
 
 Areas: `doc` (timeline, items, preview, contactSheet, undo/redo, save/open/new/demo), `media`
 (files, import, thumbnails, peaks), `timeline` (append, place, split, trim, move, delete, speed,
-volume, fade, transition, select, seek, copy, cut, paste, clipboard), `text` (add, caption, templates, applyTemplate),
+volume, fade, transition, setTransition, removeTransition, select, seek, copy, cut, paste,
+clipboard), `text` (add, caption, templates, applyTemplate),
 `look` (filters, filter, adjust, effects, effect, state — filters and adjustments stay
 separate), `clip` (transform, setTransform, keyframe, freeze, reverse, smoothSlowmo, mirror,
 rotate, autoCut), `compose` (state, crop, blend, chromaKey, mask, stabilize, autoReframe,

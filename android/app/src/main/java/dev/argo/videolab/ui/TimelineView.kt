@@ -54,6 +54,7 @@ import dev.argo.videolab.core.ClipKind
 import dev.argo.videolab.core.Lab
 import dev.argo.videolab.core.Timeline
 import dev.argo.videolab.core.Track
+import dev.argo.videolab.core.Transition
 import dev.argo.videolab.core.formatTime
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
@@ -119,6 +120,10 @@ fun TimelineView(
     canPaste: Boolean = false,
     /** Two-finger tap. */
     onUndo: () -> Unit = {},
+    /** A transition was tapped. */
+    onTransition: (Long) -> Unit = {},
+    /** The transition being edited (outlined). */
+    selectedTransition: Long? = null,
 ) {
     val density = LocalDensity.current
     val media by lab.mediaVersion.collectAsState()
@@ -142,6 +147,22 @@ fun TimelineView(
     val rowH = with(density) { 34.dp.toPx() }
     val gap = with(density) { 6.dp.toPx() }
     val handleW = with(density) { 14.dp.toPx() }
+
+    // A transition's box on its row: its span, at least a thumb wide so it can be tapped zoomed out.
+    val minTransitionW = with(density) { 24.dp.toPx() }
+    fun transitionRect(tr: Transition, row: Row, now: Double, cx: Float): Rect {
+        val x0 = cx + ((tr.start - now) * pps).toFloat()
+        val x1 = cx + ((tr.start + tr.duration - now) * pps).toFloat()
+        val mid = (x0 + x1) / 2
+        val half = max((x1 - x0) / 2, minTransitionW / 2)
+        val inset = row.height * 0.12f
+        return Rect(mid - half, row.top + inset, mid + half, row.top + row.height - inset)
+    }
+    /** The transition under a tap, if any. */
+    fun transitionAt(p: Offset, rowsNow: List<Row>, now: Double, cx: Float): Long? =
+        rowsNow.filter { it.video && p.y in it.top..(it.top + it.height) }.firstNotNullOfOrNull { row ->
+            row.track?.transitions?.firstOrNull { transitionRect(it, row, now, cx).contains(p) }?.id
+        }
 
     fun rows(t: Timeline): List<Row> {
         val out = mutableListOf<Row>()
@@ -269,6 +290,7 @@ fun TimelineView(
                         // Released before the long press: a tap selects the clip; tapping the
                         // selected clip again opens its quick menu.
                         if (currentEvent.changes.none { it.pressed }) {
+                            transitionAt(down.position, rowsNow, t0, cx)?.let { onTransition(it); return@awaitEachGesture }
                             if (hit != null && hit.id == sel) menu = QuickMenu(hit.id, tAtDown, down.position) else onSelect(hit?.id)
                             return@awaitEachGesture
                         }
@@ -379,8 +401,10 @@ fun TimelineView(
                             }
                         }
                         else -> {
-                            // Tap: select the clip under the finger (the selected one: its menu).
-                            if (hit != null && hit.id == sel && handle == null) menu = QuickMenu(hit.id, tAtDown, down.position)
+                            // Tap: a transition, or select the clip under the finger (the selected one: its menu).
+                            val tr = if (handle == null) transitionAt(down.position, rowsNow, t0, cx) else null
+                            if (tr != null) onTransition(tr)
+                            else if (hit != null && hit.id == sel && handle == null) menu = QuickMenu(hit.id, tAtDown, down.position)
                             else onSelect(hit?.id)
                         }
                     }
@@ -410,12 +434,12 @@ fun TimelineView(
                         }
                     }
                 }
-                if (row.main) {
-                    // Transitions on the main track: a small white diamond at each one.
-                    timeline.videoTracks.firstOrNull()?.transitions?.forEach { tr ->
-                        val x = cx + ((tr.start + tr.duration / 2 - now) * pps).toFloat()
-                        if (x in 0f..size.width) drawTransitionMark(Offset(x, row.top + row.height / 2))
-                    }
+                // Transitions on this track: a block over the cut as long as the transition, with
+                // its type and length when there is room (a tappable badge when zoomed out).
+                if (row.video) row.track?.transitions?.forEach { tr ->
+                    val r = transitionRect(tr, row, now, cx)
+                    if (r.right < 0f || r.left > size.width) return@forEach
+                    drawTransition(tr, r, tr.id == selectedTransition, measurer)
                 }
             }
             // A clip being moved: the target row (or the new-track band) and the clip under the finger.
@@ -644,11 +668,25 @@ private fun DrawScope.drawSelection(r: Rect, handleW: Float) {
     }
 }
 
-private fun DrawScope.drawTransitionMark(c: Offset) {
-    val s = 7.dp.toPx()
-    val p = Path().apply { moveTo(c.x, c.y - s); lineTo(c.x + s, c.y); lineTo(c.x, c.y + s); lineTo(c.x - s, c.y); close() }
-    drawPath(p, Color.White)
-    drawPath(p, Color(0xFF111114), style = Stroke(1.5.dp.toPx()))
+/** A transition block: translucent over the cut, a bow-tie mark, and "Name · 0.6 s" when it fits. */
+private fun DrawScope.drawTransition(tr: Transition, r: Rect, selected: Boolean, measurer: androidx.compose.ui.text.TextMeasurer) {
+    val radius = CornerRadius(5.dp.toPx())
+    drawRoundRect(Color(0xCC1E1E24), r.topLeft, r.size, radius)
+    drawRoundRect(if (selected) Accent else Color.White, r.topLeft, r.size, radius, style = Stroke(if (selected) 2.dp.toPx() else 1.dp.toPx()))
+    // Bow tie: two triangles meeting at the cut.
+    val s = min(r.height * 0.28f, 7.dp.toPx())
+    val c = Offset(r.center.x, r.top + r.height * 0.38f)
+    val tie = Path().apply {
+        moveTo(c.x - s, c.y - s); lineTo(c.x, c.y); lineTo(c.x - s, c.y + s); close()
+        moveTo(c.x + s, c.y - s); lineTo(c.x, c.y); lineTo(c.x + s, c.y + s); close()
+    }
+    drawPath(tie, if (selected) Accent else Color.White)
+    val style = TextStyle(color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+    val full = "${tr.name} · ${"%.1f".format(tr.duration)} s"
+    val short = "${"%.1f".format(tr.duration)}s"
+    val room = (r.width - 6.dp.toPx()).toInt()
+    val label = listOf(full, short).map { measurer.measure(it, style, maxLines = 1) }.firstOrNull { it.size.width <= room }
+    if (label != null) drawText(label, topLeft = Offset(r.center.x - label.size.width / 2f, r.bottom - label.size.height - 2.dp.toPx()))
 }
 
 /** A keyframe marker: a white diamond with a dark outline. */

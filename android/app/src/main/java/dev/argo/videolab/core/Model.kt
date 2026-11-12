@@ -31,7 +31,8 @@ data class Clip(
     val duration get() = end - start
 }
 
-data class Transition(val id: Long, val effect: String, val start: Double, val duration: Double)
+/** A transition on a cut: FilmCraft's effect id and display name, its span, and the clips it joins (null at a track's edge). */
+data class Transition(val id: Long, val effect: String, val name: String, val start: Double, val duration: Double, val from: Long?, val to: Long?)
 
 data class Track(val id: Long, val name: String, val video: Boolean, val muted: Boolean, val clips: List<Clip>, val transitions: List<Transition>)
 
@@ -90,7 +91,7 @@ data class Timeline(
                         )
                     },
                     transitions = (t["transitions"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { x ->
-                        Transition(x.l("id") ?: 0, x.s("effect") ?: "", x.d("start") ?: 0.0, x.d("duration") ?: 0.0)
+                        Transition(x.l("id") ?: 0, x.s("effect") ?: "", x.s("name") ?: x.s("effect") ?: "", x.d("start") ?: 0.0, x.d("duration") ?: 0.0, x.l("from"), x.l("to"))
                     },
                 )
             }

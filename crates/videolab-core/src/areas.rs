@@ -60,7 +60,12 @@ pub fn timeline_projection(seq: &Value) -> Value {
             .map(|a| a.as_slice())
             .unwrap_or(&[])
             .iter()
-            .map(|x| json!({"id": x["id"], "effect": x["effect"], "from": x["from"], "to": x["to"], "start": secs(&x["start"]), "duration": secs(&x["duration"])}))
+            .map(|x| {
+                let effect = x["effect"].as_str().unwrap_or("");
+                // FilmCraft's display name ("Cross Dissolve"), for the timeline's label
+                let name = filmcraft_project::effect::effect_defs().iter().find(|d| d.id == effect).map_or(effect, |d| d.name);
+                json!({"id": x["id"], "effect": effect, "name": name, "from": x["from"], "to": x["to"], "start": secs(&x["start"]), "duration": secs(&x["duration"])})
+            })
             .collect();
         json!({"id": t["id"], "name": t["name"], "kind": kind, "muted": t["muted"], "locked": t["locked"], "clips": clips, "transitions": transitions})
     };
@@ -708,6 +713,31 @@ fn register_timeline(r: &mut Registry) {
             }
             run(ctx, "sequence.applyVideoTransition", params)
         })
+        .register();
+
+    #[derive(Deserialize)]
+    struct SetTransition {
+        transition: u64,
+        seconds: f64,
+    }
+    r.function("timeline", "setTransition", "Change a transition's length (seconds), centred on its cut")
+        .params(json!({"type": "object", "properties": {"transition": {"type": "integer"}, "seconds": {"type": "number"}}, "required": ["transition", "seconds"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: SetTransition| {
+            let seq = run(ctx, "sequence.inspect", json!({}))?;
+            let fps = seq["settings"]["frame_rate"]["num"].as_f64().unwrap_or(30.0) / seq["settings"]["frame_rate"]["den"].as_f64().unwrap_or(1.0).max(1.0);
+            run(ctx, "sequence.setTransition", json!({"transition": p.transition, "frames": (p.seconds.clamp(0.05, 10.0) * fps).round().max(1.0) as i64}))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct RemoveTransition {
+        transition: u64,
+    }
+    r.function("timeline", "removeTransition", "Remove a transition (the clips cut straight)")
+        .params(json!({"type": "object", "properties": {"transition": {"type": "integer"}}, "required": ["transition"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: RemoveTransition| run(ctx, "sequence.removeTransition", json!({"transitions": [p.transition]})))
         .register();
 
     #[derive(Deserialize)]

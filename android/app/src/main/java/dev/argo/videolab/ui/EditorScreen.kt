@@ -77,6 +77,9 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
     var agentOpen by rememberSaveable { mutableStateOf(false) }
     // The open tool group (a second-level bar, as CapCut's), null for the top level.
     var group by rememberSaveable { mutableStateOf<String?>(null) }
+    // The transition tapped on the timeline, edited in the Transition sheet.
+    var transitionEdit by rememberSaveable { mutableStateOf<Long?>(null) }
+    LaunchedEffect(tool) { if (tool != Tool.Transition) transitionEdit = null }
     LaunchedEffect(selected) { group = null }
     // The playhead, read where it is drawn (the timeline's canvas, the time label) rather than
     // here: while playing it moves every display frame, and only those should redraw for it.
@@ -361,6 +364,8 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             onQuick = { action, id, seconds -> quick(action, id, seconds) },
                             canPaste = canPaste,
                             onUndo = { scope.launch { lab.fn("doc.undo") } },
+                            onTransition = { id -> transitionEdit = id; tool = Tool.Transition },
+                            selectedTransition = transitionEdit.takeIf { tool == Tool.Transition },
                         )
                     } else {
                         Box(Modifier.fillMaxWidth().height(232.dp), contentAlignment = Alignment.Center) {
@@ -377,7 +382,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                     val clip = selected?.let { timeline?.clip(it) }
                     val current = tool
                     if (current != null) {
-                        ToolSheet(app, current, clip, playheadNow(), onDone = { tool = null })
+                        ToolSheet(app, current, clip, playheadNow(), onDone = { tool = null }, transition = transitionEdit)
                     } else {
                         val bar = if (clip != null) clipBar(clip, group) else mainBar(group)
                         ToolBar {
