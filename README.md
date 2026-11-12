@@ -99,7 +99,8 @@ cargo run -p videolab-cli -- script cut.js --root ./workspace --out-dir out/
 
 * **Home:** new project from videos, 9:16 / 16:9 / 1:1, FilmCraft's demo project, saved projects.
 * **Editor:** preview (wgpu/Vulkan or CPU), a slim row under it (time, play, keyframe ◇, undo,
-  redo), and a phone timeline with a fixed centre playhead: drag to scrub, pinch to zoom, tap to
+  redo), and a phone timeline with a fixed centre playhead: drag to scrub (a slow scrub sticks to cuts, clip edges and markers with a tick, as CapCut's
+  magnet does; trim handles snap too), pinch to zoom, tap to
   select, drag handles to trim, long-press to move, **swipe down on a clip to split**, tap the
   selected clip (or long-press and let go) for **Split / Cut / Copy / Paste / Duplicate / Delete**,
   two-finger tap to undo; transitions show on their cut with type and length, and tapping one

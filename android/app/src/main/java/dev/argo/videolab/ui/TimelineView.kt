@@ -306,6 +306,21 @@ fun TimelineView(
                     var fingers = 1
                     var scrub = t0
                     var cutting = false
+                    // The magnet (CapCut's): while scrubbing slowly the playhead sticks to an edge —
+                    // a cut, a clip's start or end on any track, a marker, the start or end — within
+                    // a few pixels, with a tick, and lets go once the finger moves past. A fast
+                    // scrub or a fling passes over edges.
+                    val magnetPx = 12.dp.toPx()
+                    val slowPx = 900f // finger speed (px/s) under which the magnet holds
+                    val edges = (listOf(0.0, tl.duration) + tl.tracks.flatMap { tr -> tr.clips.flatMap { listOf(it.start, it.end) } } + tl.markers.map { it.at }).distinct()
+                    var raw = t0
+                    var stuck: Double? = null
+                    var speed = 0f
+                    var lastAt = down.uptimeMillis
+                    // Trimming snaps the edge being dragged to the playhead and other clips' edges.
+                    val trimClip = if (handle != null) sel?.let { tl.clip(it) } else null
+                    val trimEdges = trimClip?.let { c -> listOf(t0) + tl.tracks.flatMap { tr -> tr.clips.filter { it.id != c.id }.flatMap { listOf(it.start, it.end) } } }.orEmpty()
+                    var trimStuck: Double? = null
                     // Where a swipe down splits: under the finger, snapped to the playhead nearby,
                     // kept a frame inside the clip.
                     val cutAt = hit?.let { c ->
@@ -351,10 +366,25 @@ fun TimelineView(
                         if (justMoved) moved = true
                         if (moved) {
                             tracker.addPosition(ch.uptimeMillis, ch.position)
+                            val dt = (ch.uptimeMillis - lastAt).coerceAtLeast(1L)
+                            lastAt = ch.uptimeMillis
+                            speed = speed * 0.6f + abs(dx) / dt * 1000f * 0.4f
                             if (handle != null && sel != null) {
-                                trim = TrimDrag(sel!!, handle, dxTotal / pps.toDouble())
+                                var delta = dxTotal / pps.toDouble()
+                                if (trimClip != null) {
+                                    val base = if (handle == "in") trimClip.start else trimClip.end
+                                    val near = trimEdges.minByOrNull { abs(it - (base + delta)) }?.takeIf { abs(it - (base + delta)) * pps < magnetPx }
+                                    if (near != null && near != trimStuck) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    trimStuck = near
+                                    if (near != null) delta = near - base
+                                }
+                                trim = TrimDrag(sel!!, handle, delta)
                             } else if (!zooming) {
-                                scrub = (if (justMoved) t0 - dxTotal / pps else scrub - dx / pps).coerceIn(0.0, max(0.0, tl.duration))
+                                raw = (if (justMoved) t0 - dxTotal / pps else raw - dx / pps).coerceIn(0.0, max(0.0, tl.duration))
+                                val near = if (speed < slowPx) edges.minByOrNull { abs(it - raw) }?.takeIf { abs(it - raw) * pps < magnetPx } else null
+                                if (near != null && near != stuck) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                stuck = near
+                                scrub = near ?: raw
                                 onScrub(scrub)
                             }
                             ch.consume()
@@ -381,8 +411,9 @@ fun TimelineView(
                         }
                         zooming -> {}
                         moved -> {
-                            // Fling: keep scrubbing with decaying velocity, then settle.
-                            val v = -tracker.calculateVelocity().x / pps
+                            // Fling: keep scrubbing with decaying velocity, then settle. Let go while
+                            // the magnet holds an edge: it stays there.
+                            val v = if (stuck != null) 0f else -tracker.calculateVelocity().x / pps
                             scope.launch {
                                 var vel = v.toDouble()
                                 var pos = scrub
