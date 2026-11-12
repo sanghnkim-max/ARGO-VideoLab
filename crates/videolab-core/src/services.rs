@@ -8,6 +8,10 @@
 //! same rule holds for the UI and for agents, as with PhotoCraft's `AuthorizedWorkspace` in
 //! ImageLab.
 //!
+//! Read-only roots ([`WorkspaceServices::with_read_roots`]: the phone's shared storage, where the
+//! camera and gallery keep videos) widen *reads* only, so picked media import in place instead of
+//! being copied; writing (projects, exports) stays inside the workspace.
+//!
 //! Some engine paths (an export streaming to its file) open files directly rather than through
 //! `Services`; the core makes the workspace the process's working directory so relative paths
 //! land there too, and Android's app sandbox bounds the rest.
@@ -20,13 +24,43 @@ use filmcraft_engine::{FsServices, Services, media_browser};
 pub struct WorkspaceServices {
     root: PathBuf,
     temp: Option<PathBuf>,
+    /// Canonical folders that may be read but not written (shared media storage).
+    read_roots: Vec<PathBuf>,
     fs: FsServices,
 }
 
 impl WorkspaceServices {
     /// `root` and `temp` must already be canonical.
     pub fn new(root: PathBuf, temp: Option<PathBuf>) -> Self {
-        Self { root, temp, fs: FsServices }
+        Self { root, temp, read_roots: Vec::new(), fs: FsServices }
+    }
+
+    /// Also allow reading (never writing) beneath `roots`; those that do not exist are skipped.
+    pub fn with_read_roots(mut self, roots: &[PathBuf]) -> Self {
+        self.read_roots = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+        self
+    }
+
+    /// Like [`Self::resolve`], also accepting paths beneath a read-only root.
+    pub fn resolve_read(&self, path: &str) -> io::Result<PathBuf> {
+        match self.resolve(path) {
+            Ok(p) => Ok(p),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && !self.read_roots.is_empty() => {
+                let p = Path::new(path.trim());
+                if !p.is_absolute() {
+                    return Err(e);
+                }
+                let resolved = p.canonicalize().map_err(|_| e)?;
+                if self.read_roots.iter().any(|r| resolved.starts_with(r)) { Ok(resolved) } else { Err(denied(path)) }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn with_read<R>(&self, path: &str, f: impl FnOnce(&str) -> io::Result<R>) -> io::Result<R> {
+        let p = self.resolve_read(path)?;
+        let s = p.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
+        f(s)
     }
 
     /// The path the engine means, if it is allowed: absolute, beneath the root or temp folder,
@@ -95,7 +129,7 @@ fn canonical_prefix(p: &Path) -> io::Result<PathBuf> {
 
 impl Services for WorkspaceServices {
     fn read_file(&self, path: &str) -> io::Result<Vec<u8>> {
-        self.with(path, |p| self.fs.read_file(p))
+        self.with_read(path, |p| self.fs.read_file(p))
     }
     fn write_file(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.with(path, |p| self.fs.write_file(p, data))
@@ -104,13 +138,13 @@ impl Services for WorkspaceServices {
         self.with(path, |p| self.fs.write_file_new(p, data))
     }
     fn file_size(&self, path: &str) -> io::Result<u64> {
-        self.with(path, |p| self.fs.file_size(p))
+        self.with_read(path, |p| self.fs.file_size(p))
     }
     fn read_range(&self, path: &str, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        self.with(path, |p| self.fs.read_range(p, offset, len))
+        self.with_read(path, |p| self.fs.read_range(p, offset, len))
     }
     fn reader(&self, path: &str) -> Option<io::Result<filmcraft_media::SharedReader>> {
-        match self.resolve(path) {
+        match self.resolve_read(path) {
             Ok(p) => self.fs.reader(&p.to_string_lossy()),
             Err(e) => Some(Err(e)),
         }
@@ -125,8 +159,10 @@ impl Services for WorkspaceServices {
     fn file_loader(&self) -> Option<filmcraft_media::sequence::FrameLoader> {
         let root = self.root.clone();
         let temp = self.temp.clone();
+        let reads = self.read_roots.clone();
         Some(std::sync::Arc::new(move |p: &str| {
-            let me = WorkspaceServices::new(root.clone(), temp.clone());
+            let mut me = WorkspaceServices::new(root.clone(), temp.clone());
+            me.read_roots = reads.clone();
             me.read_file(p)
         }))
     }
@@ -170,5 +206,23 @@ mod tests {
         std::fs::create_dir_all(root.join("exports")).unwrap();
         s.write_file("exports/out.bin", b"x").unwrap();
         assert!(root.join("exports/out.bin").is_file());
+    }
+
+    #[test]
+    fn read_roots_are_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        let shared = dir.path().join("DCIM");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("clip.mp4"), b"movie").unwrap();
+        let s = WorkspaceServices::new(root.canonicalize().unwrap(), None).with_read_roots(std::slice::from_ref(&shared));
+        let clip = shared.join("clip.mp4").to_string_lossy().into_owned();
+        assert_eq!(s.read_file(&clip).unwrap(), b"movie");
+        assert_eq!(s.file_size(&clip).unwrap(), 5);
+        assert_eq!(s.write_file(&clip, b"x").unwrap_err().kind(), io::ErrorKind::PermissionDenied, "never written");
+        let outside = dir.path().join("other.txt");
+        std::fs::write(&outside, b"no").unwrap();
+        assert!(s.read_file(&outside.to_string_lossy()).is_err());
     }
 }

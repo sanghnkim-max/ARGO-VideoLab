@@ -4011,6 +4011,7 @@ dependencies = [
  "lab-api",
  "lab-mcp",
  "lab-script",
+ "libc",
  "log",
  "ndk",
  "serde",

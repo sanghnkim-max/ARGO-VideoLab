@@ -28,6 +28,7 @@ use serde_json::Value;
 const MAX_SCRIPT_FILE: u64 = 1 << 20;
 
 fn main() {
+    videolab_core::prepare_native_process();
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let rest = || args[1..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
     let code = match args.first().and_then(|a| a.to_str()) {

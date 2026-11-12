@@ -31,6 +31,8 @@ pub mod features;
 mod hub;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
+#[cfg(target_os = "android")]
+pub mod mediacodec_enc;
 pub mod services;
 
 use std::path::{Path, PathBuf};
@@ -105,6 +107,9 @@ pub struct LabOptions {
     pub control_port: u16,
     /// The bundled `filmcraft-cli` executable (Android: `nativeLibraryDir/libfilmcraft_cli.so`).
     pub cli_path: Option<PathBuf>,
+    /// Folders FilmCraft may read media from in place, never write (Android: shared storage,
+    /// where the camera and gallery keep videos), so picked files need no copy.
+    pub read_roots: Vec<PathBuf>,
 }
 
 /// What `filmcraft-cli` printed and returned.
@@ -193,9 +198,15 @@ impl Lab {
         if gpu_ok {
             register_gpu_exports();
         }
-        let services = Arc::new(services::WorkspaceServices::new(root.clone(), Some(temp.clone())));
+        let services = Arc::new(services::WorkspaceServices::new(root.clone(), Some(temp.clone())).with_read_roots(&options.read_roots));
         let engine = Arc::new(Engine::new(services));
         if owns_prefs {
+            // FilmCraft's native-frontend persistence in VideoLab's own data folder: preferences
+            // load and save, plus auto-save and the crash-recovery journal (desktop FilmCraft's
+            // folder is never touched).
+            if let Err(e) = engine.lock().start_autosave(filmcraft_engine::autosave::AutosaveConfig::new(&own_data)) {
+                log::warn!("FilmCraft auto-save is off: {e}");
+            }
             phone_defaults(&engine, &own_data);
         }
         engine.set_gpu(gpu_ok);
@@ -392,8 +403,10 @@ impl Lab {
     }
 
     /// Import a workspace file (already copied in, e.g. streamed by the app).
+    /// Import a media file: in the workspace (relative or absolute), or in place beneath a read
+    /// root (a camera video in shared storage).
     pub fn import_file(&self, path: &str) -> Result<Value> {
-        let abs = self.engine.resolve(path)?;
+        let abs = self.engine.services.resolve_read(path)?;
         let mut r = self.execute("file.import", json!({"paths": [abs.to_string_lossy()]}))?;
         if let Value::Object(m) = &mut r {
             m.insert("path".into(), json!(path));
@@ -552,17 +565,16 @@ fn run_bounded(mut cmd: std::process::Command, timeout: Duration) -> Result<CliO
     Ok(CliOutput { code, stdout, stderr })
 }
 
-/// FilmCraft preferences a phone editor wants, set once in VideoLab's own data folder (never in a
-/// desktop FilmCraft's): clips fit the frame when placed ("Set to frame size"), as phone editors
-/// do; FilmCraft's default (Premiere's) shows a 4K clip at 200% in a 1080p sequence. Set once, so a
-/// later choice (an agent's `prefs.set`) stays.
-fn phone_defaults(engine: &Engine, data: &Path) {
-    let marker = data.join("videolab-defaults-v1");
-    if marker.exists() {
-        return;
-    }
-    if engine.execute("prefs.set", json!({"key": "media.defaultMediaScaling", "value": "setToFrameSize"})).is_ok() {
-        let _ = std::fs::write(&marker, b"media.defaultMediaScaling=setToFrameSize\n");
+/// FilmCraft preferences a phone editor wants, in VideoLab's own data folder (never in a desktop
+/// FilmCraft's), on every launch: clips fit the frame when placed ("Set to frame size"), as phone
+/// editors do; FilmCraft's default (Premiere's) shows a 4K clip at 200% in a 1080p sequence. The
+/// app has no setting for it, so it is not left to a value a session may have changed.
+fn phone_defaults(engine: &Engine, _data: &Path) {
+    let now = engine.execute("prefs.get", json!({"key": "media.defaultMediaScaling"})).ok();
+    if now.as_ref().and_then(|v| v.as_str().or_else(|| v["value"].as_str())) != Some("setToFrameSize")
+        && let Err(e) = engine.execute("prefs.set", json!({"key": "media.defaultMediaScaling", "value": "setToFrameSize"}))
+    {
+        log::warn!("could not set default media scaling: {e}");
     }
 }
 
@@ -598,14 +610,24 @@ fn set_env(key: &str, value: &str) {
     unsafe { std::env::set_var(key, value) };
 }
 
-/// The OS's hardware video decoders in front of FilmCraft's own, as FilmCraft's desktop builds do
-/// with filmcraft-platform: MediaCodec on Android; on macOS / Windows / Linux, FilmCraft's own
-/// VideoToolbox / Media Foundation / VA-API registration.
+/// The OS's hardware video decoders (and H.264 export encoder) in front of FilmCraft's own, as
+/// FilmCraft's desktop builds do with filmcraft-platform: MediaCodec on Android; on macOS /
+/// Windows / Linux, FilmCraft's own VideoToolbox / Media Foundation / VA-API / NVENC registration.
 pub fn register_hardware_decoders() {
     #[cfg(target_os = "android")]
-    mediacodec::register();
+    {
+        mediacodec::register();
+        mediacodec_enc::register();
+    }
     #[cfg(not(target_os = "android"))]
     let _ = filmcraft_platform::register();
+}
+
+/// For a native process (the CLI): let Android's hardware codecs answer it (see
+/// `mediacodec::start_binder_thread_pool`). Does nothing elsewhere.
+pub fn prepare_native_process() {
+    #[cfg(target_os = "android")]
+    mediacodec::start_binder_thread_pool();
 }
 
 /// Decode `frames` frames of `path` in order and report the speed: `bench-decode` for the

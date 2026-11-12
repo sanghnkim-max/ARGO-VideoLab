@@ -287,3 +287,117 @@ fn clip_tools_and_sound() {
     assert!(n["path"].as_str().unwrap().contains("media/narration/"), "{n}");
     assert!(lab.call("audio.narrate", json!({"text": "  "}), Source::Agent).is_err());
 }
+
+#[test]
+fn move_onto_a_new_track_and_back() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap();
+    let video = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().filter(|t| t["kind"] == "video").cloned().collect::<Vec<_>>();
+    let before = video(&lab).len();
+    let clip = video(&lab)[0]["clips"][1]["clip"].as_u64().unwrap();
+    call("timeline.move", json!({"clip": clip, "seconds": 1.0, "track": "new"}));
+    let after = video(&lab);
+    assert_eq!(after.len(), before + 1, "a new video track");
+    let top = after.last().unwrap();
+    assert_eq!(top["clips"][0]["clip"], json!(clip), "the clip is on it: {top}");
+    assert!((top["clips"][0]["start"].as_f64().unwrap() - 1.0).abs() < 0.05);
+    // Back onto V1 by the track's id.
+    let v1 = after[0]["id"].clone();
+    call("timeline.move", json!({"clip": clip, "seconds": 30.0, "track": v1}));
+    assert!(video(&lab)[0]["clips"].as_array().unwrap().iter().any(|c| c["clip"] == json!(clip)));
+    // Only in time (no track): it stays on its own track.
+    call("timeline.move", json!({"clip": clip, "seconds": 40.0}));
+    let c = video(&lab)[0]["clips"].as_array().unwrap().iter().find(|c| c["clip"] == json!(clip)).cloned().unwrap();
+    assert!((c["start"].as_f64().unwrap() - 40.0).abs() < 0.05, "{c}");
+}
+
+#[test]
+fn compose_tools_round_trip() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, score, start) = demo_clips(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let st = |lab: &Lab| lab.call("compose.state", json!({"clip": clip}), Source::Agent).unwrap();
+    let plain = lab.engine.render(filmcraft_time::Tick::from_seconds_f64(start + 1.0), 320).unwrap().0.rgba;
+    // crop
+    call("compose.crop", json!({"clip": clip, "left": 10, "bottom": 20}));
+    assert_eq!(st(&lab)["crop"]["left"], 10.0, "{}", st(&lab));
+    assert_ne!(lab.engine.render(filmcraft_time::Tick::from_seconds_f64(start + 1.0), 320).unwrap().0.rgba, plain, "crop changes the picture");
+    call("compose.crop", json!({"clip": clip}));
+    assert!(st(&lab)["crop"].is_null());
+    // blend and opacity
+    call("compose.blend", json!({"clips": [clip], "mode": "screen", "opacity": 70}));
+    assert_eq!((st(&lab)["blend"].clone(), st(&lab)["opacity"].clone()), (json!("Screen"), json!(70.0)));
+    assert!(lab.call("compose.blend", json!({"clips": [clip], "mode": "sparkle"}), Source::Agent).is_err());
+    // chroma key
+    call("compose.chromaKey", json!({"clip": clip, "strength": 70}));
+    assert_eq!(st(&lab)["chromaKey"]["color"], "#00b140", "{}", st(&lab));
+    call("compose.chromaKey", json!({"clip": clip, "color": "#0000ff"}));
+    assert_eq!(st(&lab)["chromaKey"]["color"], "#0000ff");
+    assert_eq!(st(&lab)["chromaKey"]["strength"], 70.0);
+    call("compose.chromaKey", json!({"clip": clip, "on": false}));
+    assert!(st(&lab)["chromaKey"].is_null());
+    // mask: one at a time
+    call("compose.mask", json!({"clip": clip, "shape": "circle", "feather": 0}));
+    call("compose.mask", json!({"clip": clip, "shape": "rounded", "inverted": true}));
+    let m = st(&lab)["mask"].clone();
+    assert_eq!((m["shape"].clone(), m["inverted"].clone()), (json!("rounded"), json!(true)), "{m}");
+    assert_eq!(lab.engine.execute("masks.list", json!({"clip": clip})).unwrap()["masks"].as_array().unwrap().len(), 1);
+    call("compose.mask", json!({"clip": clip, "shape": "none"}));
+    assert!(st(&lab)["mask"].is_null());
+    // stabilize / reframe toggles
+    call("compose.stabilize", json!({"clips": [clip]}));
+    assert!(!st(&lab)["stabilize"].is_null());
+    call("compose.stabilize", json!({"clips": [clip]}));
+    assert!(st(&lab)["stabilize"].is_null());
+    assert_eq!(call("compose.autoReframe", json!({"clips": [clip]}))[0]["on"], true);
+    assert_eq!(st(&lab)["autoReframe"], true);
+    // voice effects replace each other; enhance toggles two effects
+    call("compose.voice", json!({"clips": [score], "key": "chipmunk"}));
+    call("compose.voice", json!({"clips": [score], "key": "hall"}));
+    let fx = |lab: &Lab| lab.engine.execute("sequence.inspect", json!({})).unwrap()["audio"].as_array().unwrap().iter().flat_map(|t| t["items"].as_array().unwrap().clone()).find(|c| c["clip"] == json!(score)).unwrap()["effects"].as_array().unwrap().iter().map(|e| e["effect"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert!(fx(&lab).contains(&"studio_reverb".into()) && !fx(&lab).contains(&"pitch_shifter".into()), "{:?}", fx(&lab));
+    call("compose.voice", json!({"clips": [score], "key": "none"}));
+    assert!(!fx(&lab).contains(&"studio_reverb".into()));
+    assert_eq!(call("compose.enhanceVoice", json!({"clips": [score]}))[0]["on"], true);
+    assert!(fx(&lab).contains(&"denoise".into()) && fx(&lab).contains(&"speech_enhance".into()), "{:?}", fx(&lab));
+    call("compose.enhanceVoice", json!({"clips": [score]}));
+    assert!(!fx(&lab).contains(&"denoise".into()) && !fx(&lab).contains(&"speech_enhance".into()));
+}
+
+#[test]
+fn duplicate_detach_canvas_and_gaps() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap_or_else(|e| panic!("{f}: {e}"));
+    let v1 = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().find(|t| t["kind"] == "video").unwrap()["clips"].as_array().unwrap().clone();
+    let first = v1(&lab)[0].clone();
+    let (clip, n, dur) = (first["clip"].as_u64().unwrap(), v1(&lab).len(), lab.timeline()["duration"].as_f64().unwrap());
+    call("compose.duplicate", json!({"clip": clip}));
+    let after = v1(&lab);
+    assert_eq!(after.len(), n + 1, "one more clip on V1");
+    let end = first["end"].as_f64().unwrap();
+    let len = end - first["start"].as_f64().unwrap();
+    assert!((after[1]["start"].as_f64().unwrap() - end).abs() < 0.05, "the copy right after: {}", after[1]);
+    assert!((lab.timeline()["duration"].as_f64().unwrap() - dur - len).abs() < 0.1, "what follows moves later");
+    // detach: linked picture + sound become independent
+    let r = call("compose.detachAudio", json!({"clips": [clip]}));
+    assert_eq!(r["detached"], json!([clip]), "{r}");
+    assert_eq!(call("compose.detachAudio", json!({"clips": [clip]}))["detached"], json!([]));
+    // canvas
+    call("project.setCanvas", json!({"ratio": "1:1"}));
+    let c = call("project.canvas", json!({}));
+    assert_eq!((c["width"].clone(), c["height"].clone(), c["ratio"].clone()), (c["height"].clone(), c["width"].clone(), json!("1:1")), "{c}");
+    call("project.setCanvas", json!({"ratio": "9:16"}));
+    let c = call("project.canvas", json!({}));
+    assert_eq!(c["ratio"], "9:16", "{c}");
+    assert!(lab.call("project.setCanvas", json!({"ratio": "2:7"}), Source::Agent).is_err());
+    // gaps: move a later clip away, then close
+    let last = v1(&lab).last().unwrap().clone();
+    let id = last["clip"].as_u64().unwrap();
+    call("timeline.move", json!({"clip": id, "seconds": last["start"].as_f64().unwrap() + 5.0}));
+    let gapped = lab.timeline()["duration"].as_f64().unwrap();
+    assert!(call("project.closeGaps", json!({}))["moved"].as_u64().unwrap() >= 1);
+    assert!(lab.timeline()["duration"].as_f64().unwrap() < gapped - 4.0, "the gap is gone");
+}

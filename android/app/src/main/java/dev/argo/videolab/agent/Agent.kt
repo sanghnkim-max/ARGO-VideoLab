@@ -317,7 +317,9 @@ class Agent(private val lab: Lab, private val settings: Settings) {
               `await lab.doc.timeline()`; look with `lab.doc.preview` / `lab.doc.contactSheet`; find beats and pauses
               with `lab.media.peaks`; edit with `lab.timeline.*` and `lab.text.*`; looks with `lab.look.*` (filters,
               adjust, effects shelf); clip tools with `lab.clip.*` (transform + keyframes, freeze, reverse, smooth
-              slow-mo, mirror, rotate, auto cut); sound with `lab.audio.*` (auto duck, loudness, text to speech);
+              slow-mo, mirror, rotate, auto cut); compositing with `lab.compose.*` (crop, opacity + blend modes,
+              chroma key, masks, stabilize, auto reframe, duplicate, detach audio, voice effects, enhance voice);
+              the canvas and gaps with `lab.project.*` (aspect ratio, close gaps); sound with `lab.audio.*` (auto duck, loudness, text to speech);
               speech with `lab.speech.*` (auto captions, remove pauses/fillers — needs the speech model the person
               downloads from Captions); anything else with `lab.engine.run({id, params})` (FilmCraft's ~700
               commands). Prefer one program that does many steps.

@@ -4,6 +4,11 @@
     <!-- The in-app agent calls the Claude API; the MCP server and FilmCraft's control channel
          listen on 127.0.0.1 only. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Read picked videos, sound and pictures where they are (no copy); never written. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
 
     <!-- FilmCraft's GPU compositor runs on Vulkan through wgpu; phones without it use the CPU. -->
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="false" />

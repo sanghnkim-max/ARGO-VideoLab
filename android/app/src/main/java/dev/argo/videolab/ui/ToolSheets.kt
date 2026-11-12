@@ -87,6 +87,12 @@ fun ToolSheet(app: VideoLabApp, tool: Tool, clip: Clip?, playhead: Double, onDon
             Tool.Adjust -> clip?.let { AdjustSheet(app, it, onDone) }
             Tool.Transform -> clip?.let { TransformSheet(app, it, playhead, onDone) }
             Tool.Narrate -> NarrateSheet(app, playhead, onDone)
+            Tool.Crop -> clip?.let { CropSheet(app, it, onDone) }
+            Tool.Blend -> clip?.let { BlendSheet(app, it, onDone) }
+            Tool.ChromaKey -> clip?.let { ChromaKeySheet(app, it, onDone) }
+            Tool.Mask -> clip?.let { MaskSheet(app, it, onDone) }
+            Tool.Voice -> clip?.let { VoiceSheet(app, it, onDone) }
+            Tool.Canvas -> CanvasSheet(app, onDone)
         }
     }
 }

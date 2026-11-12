@@ -32,7 +32,9 @@ Areas: `doc` (timeline, items, preview, contactSheet, undo/redo, save/open/new/d
 volume, fade, transition, select, seek), `text` (add, caption, templates, applyTemplate),
 `look` (filters, filter, adjust, effects, effect, state — filters and adjustments stay
 separate), `clip` (transform, setTransform, keyframe, freeze, reverse, smoothSlowmo, mirror,
-rotate, autoCut), `audio` (duck, normalize, voices, narrate), `speech` (captions,
+rotate, autoCut), `compose` (state, crop, blend, chromaKey, mask, stabilize, autoReframe,
+duplicate, detachAudio, voices, voice, enhanceVoice), `project` (canvas, setCanvas, closeGaps),
+`audio` (duck, normalize, voices, narrate), `speech` (captions,
 removePauses, removeFillers, models — Whisper on the device; needs a downloaded model),
 `export` (start, jobs, cancel), `engine` (FilmCraft's ~700 commands: commands, describe, run,
 batch). `lab.help('<area>')` returns schemas — read it before guessing parameter names.

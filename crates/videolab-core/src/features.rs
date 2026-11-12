@@ -2,7 +2,9 @@
 //! commands: filters and adjustments (FilmCraft's colour grading), a curated effects shelf,
 //! keyframed transform, freeze frame, reverse, smooth slow motion, mirror / rotate, auto cut
 //! (scene detection), auto-ducking and loudness, text to speech, and auto captions / pause and
-//! filler removal (FilmCraft's Whisper transcription).
+//! filler removal (FilmCraft's Whisper transcription); crop, opacity and blend modes (overlay /
+//! picture in picture), chroma key, masks, stabilize, auto reframe, duplicate, extract audio,
+//! voice effects and voice enhance; the canvas (aspect ratio) and closing gaps.
 //!
 //! The app's buttons call these; so can the in-app agent, `/mcp` clients and the CLI.
 
@@ -18,6 +20,8 @@ pub fn register(r: &mut Registry) {
     register_clip(r);
     register_audio(r);
     register_speech(r);
+    register_compose(r);
+    register_project(r);
 }
 
 // ----------------------------------------------------------------------------------- helpers
@@ -35,6 +39,18 @@ fn clip_json(ctx: &Ctx, clip: u64) -> ApiResult<Value> {
         }
     }
     Err(ApiError::not_found(format!("no clip {clip} in the open sequence")))
+}
+
+/// A clip's effect ids in order, read from the project (no `sequence.inspect` round trip, which
+/// serialises the whole sequence: this runs several times per tap).
+fn fx_ids(ctx: &Ctx, clip: u64) -> ApiResult<Vec<String>> {
+    let s = engine(ctx)?.lock();
+    let q = s.state.active_sequence.and_then(|id| s.project.sequence(id)).ok_or_else(|| ApiError::not_found("no open sequence"))?;
+    q.all_tracks()
+        .flat_map(|t| t.items.iter())
+        .find(|i| i.id.0 == clip)
+        .map(|i| i.effects.iter().map(|e| e.effect.clone()).collect())
+        .ok_or_else(|| ApiError::not_found(format!("no clip {clip} in the open sequence")))
 }
 
 fn effect_ids(clip: &Value) -> Vec<String> {
@@ -343,7 +359,7 @@ fn register_look(r: &mut Registry) {
             let preset: serde_json::Map<String, Value> = serde_json::from_str(preset).unwrap_or_default();
             let mut out = Vec::new();
             for &clip in &p.clips {
-                let ids = effect_ids(&clip_json(ctx, clip)?);
+                let ids = fx_ids(ctx, clip)?;
                 let at: Vec<usize> = ids.iter().enumerate().filter(|(_, i)| i == effect).map(|(n, _)| n).collect();
                 let on = p.on.unwrap_or(at.is_empty());
                 if !on {
@@ -518,7 +534,7 @@ fn register_clip(r: &mut Registry) {
         .typed(|ctx, p: Clips| {
             let mut out = Vec::new();
             for &clip in &p.clips {
-                let at: Vec<usize> = effect_ids(&clip_json(ctx, clip)?).iter().enumerate().filter(|(_, e)| *e == "horizontal_flip").map(|(i, _)| i).collect();
+                let at: Vec<usize> = fx_ids(ctx, clip)?.iter().enumerate().filter(|(_, e)| *e == "horizontal_flip").map(|(i, _)| i).collect();
                 let on = at.is_empty();
                 if on {
                     run(ctx, "effects.apply", json!({"clips": [clip], "effect": "horizontal_flip"}))?;
@@ -787,6 +803,450 @@ fn not_speech(engine: &crate::engine::Engine) -> Vec<u64> {
         }
     }
     out
+}
+
+// ----------------------------------------------------------------------------------- compose
+
+/// FilmCraft's blend modes that phone editors offer, by the names FilmCraft takes.
+const BLENDS: &[&str] = &["Normal", "Multiply", "Screen", "Overlay", "Darken", "Lighten", "Soft Light", "Hard Light", "Color Dodge", "Color Burn", "Difference", "Add"];
+
+/// Voice effects: key, name, FilmCraft audio effects with their parameters.
+const VOICES: &[(&str, &str, &str)] = &[
+    ("chipmunk", "Chipmunk", r#"[["pitch_shifter", {"semitones": 7}]]"#),
+    ("high", "High", r#"[["pitch_shifter", {"semitones": 4}]]"#),
+    ("deep", "Deep", r#"[["pitch_shifter", {"semitones": -5}]]"#),
+    ("monster", "Monster", r#"[["pitch_shifter", {"semitones": -10}]]"#),
+    ("echo", "Echo", r#"[["delay", {}]]"#),
+    ("hall", "Big hall", r#"[["studio_reverb", {"room": 90, "decay": 75, "wet": 45}]]"#),
+    ("room", "Small room", r#"[["studio_reverb", {"room": 25, "decay": 30, "wet": 30}]]"#),
+];
+/// Every audio effect a voice effect may add (removed when another is chosen).
+const VOICE_EFFECTS: &[&str] = &["pitch_shifter", "delay", "studio_reverb"];
+
+/// Aspect ratios for the canvas: key and (width, height) ratio.
+const CANVAS: &[(&str, u32, u32)] = &[("9:16", 9, 16), ("16:9", 16, 9), ("1:1", 1, 1), ("4:5", 4, 5), ("4:3", 4, 3), ("3:4", 3, 4), ("21:9", 21, 9)];
+
+fn indices_of(ids: &[String], effect: &str) -> Vec<usize> {
+    ids.iter().enumerate().filter(|(_, e)| *e == effect).map(|(i, _)| i).collect()
+}
+
+/// The index of `effect` on `clip`, added when it has none.
+fn ensure(ctx: &Ctx, clip: u64, effect: &str) -> ApiResult<usize> {
+    if let Some(&i) = indices_of(&fx_ids(ctx, clip)?, effect).first() {
+        return Ok(i);
+    }
+    let made = run(ctx, "effects.apply", json!({"clips": [clip], "effect": effect}))?;
+    made["applied"][0]["index"].as_u64().map(|i| i as usize).ok_or_else(|| ApiError::engine(format!("{effect} was not added")))
+}
+
+fn set_param(ctx: &Ctx, clip: u64, effect: impl Into<Value>, param: &str, value: Value) -> ApiResult<Value> {
+    run(ctx, "effects.setParam", json!({"clip": clip, "effect": effect.into(), "param": param, "value": value}))
+}
+
+/// What a picture clip has of the compose tools, read from the project: crop, opacity and blend,
+/// chroma key, mask, stabilize, auto reframe.
+fn compose_state(engine: &crate::engine::Engine, clip: u64) -> Option<Value> {
+    use filmcraft_project::ParamValue;
+    let s = engine.lock();
+    let seq = s.state.active_sequence.and_then(|id| s.project.sequence(id))?;
+    let item = seq.video_tracks.iter().flat_map(|t| t.items.iter()).find(|i| i.id.0 == clip)?;
+    let fx = |id: &str| item.effects.iter().find(|e| e.effect == id);
+    let num = |id: &str, p: &str| fx(id).and_then(|e| e.params.get(p)).and_then(|p| p.value.as_f64());
+    let crop = fx("crop").map(|_| json!({"left": num("crop", "left"), "top": num("crop", "top"), "right": num("crop", "right"), "bottom": num("crop", "bottom")}));
+    let blend = fx("opacity").and_then(|e| e.params.get("blend")).map(|p| match p.value {
+        ParamValue::Choice(i) => filmcraft_project::effect::BLEND_MODES.get(i as usize).copied().unwrap_or("Normal"),
+        _ => "Normal",
+    });
+    let key = fx("ultra_key").map(|e| {
+        let color = match e.params.get("key_color").map(|p| &p.value) {
+            Some(ParamValue::Color(c)) => format!("#{:02x}{:02x}{:02x}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8),
+            _ => "#00cc33".into(),
+        };
+        json!({"color": color, "strength": num("ultra_key", "tolerance")})
+    });
+    let mask = fx("opacity").and_then(|e| e.masks.first()).map(|m| {
+        json!({"shape": m.name.strip_prefix("videolab:").unwrap_or("custom"), "feather": m.feather.value.as_f64(), "inverted": m.inverted})
+    });
+    let stabilize = fx("warp_stabilizer").map(|_| json!({"smoothness": num("warp_stabilizer", "smoothness")}));
+    let opacity = fx("opacity").and_then(|e| e.params.get("opacity")).map_or(100.0, |p| p.value.as_f64().unwrap_or(100.0));
+    Some(json!({
+        "clip": clip, "crop": crop, "opacity": opacity, "blend": blend.unwrap_or("Normal"), "chromaKey": key,
+        "mask": mask, "stabilize": stabilize, "autoReframe": fx("auto_reframe").is_some(),
+    }))
+}
+
+/// A clip's source picture size (masks are drawn in it).
+fn source_size(engine: &crate::engine::Engine, clip: u64) -> (f64, f64) {
+    let s = engine.lock();
+    let seq = s.state.active_sequence.and_then(|id| s.project.sequence(id));
+    let dims = seq.and_then(|q| q.video_tracks.iter().flat_map(|t| t.items.iter()).find(|i| i.id.0 == clip)).and_then(|i| s.project.item(i.item)).and_then(|pi| match &pi.kind {
+        filmcraft_project::ItemKind::Media(m) => m.info.video.as_ref().map(|v| (v.width, v.height)),
+        _ => None,
+    });
+    let (w, h) = dims.or_else(|| seq.map(|q| (q.settings.width, q.settings.height))).unwrap_or((1920, 1080));
+    (f64::from(w), f64::from(h))
+}
+
+fn register_compose(r: &mut Registry) {
+    r.area("compose", "picture compositing on a clip: crop, opacity and blend mode (overlay / picture in picture), chroma key (green screen), mask, stabilize, auto reframe; voice effects and voice enhance for sound");
+
+    #[derive(Deserialize)]
+    struct One {
+        clip: u64,
+    }
+    r.function("compose", "state", "What a picture clip has of these tools: crop, opacity, blend, chromaKey, mask, stabilize, autoReframe (null / false: off); and the choices (blends, mask shapes)")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}}, "required": ["clip"]}))
+        .effects(Effects::ReadOnly)
+        .typed(|ctx, p: One| {
+            let mut st = compose_state(engine(ctx)?, p.clip).ok_or_else(|| ApiError::not_found(format!("no picture clip {} in the open sequence", p.clip)))?;
+            st["blends"] = json!(BLENDS);
+            st["maskShapes"] = json!(["circle", "rectangle", "rounded", "band"]);
+            Ok(st)
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Crop {
+        clip: u64,
+        #[serde(default)]
+        left: f64,
+        #[serde(default)]
+        top: f64,
+        #[serde(default)]
+        right: f64,
+        #[serde(default)]
+        bottom: f64,
+    }
+    r.function("compose", "crop", "Crop a clip's picture: percent cut from each edge (all 0: no crop)")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}, "left": {"type": "number"}, "top": {"type": "number"}, "right": {"type": "number"}, "bottom": {"type": "number"}}, "required": ["clip"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Crop| {
+            let edges = [("left", p.left), ("top", p.top), ("right", p.right), ("bottom", p.bottom)].map(|(k, v)| (k, v.clamp(0.0, 95.0)));
+            if edges.iter().all(|(_, v)| *v == 0.0) {
+                let n = remove_indices(ctx, p.clip, indices_of(&fx_ids(ctx, p.clip)?, "crop"))?;
+                return Ok(json!({"clip": p.clip, "crop": null, "removed": n}));
+            }
+            let i = ensure(ctx, p.clip, "crop")?;
+            for (k, v) in edges {
+                set_param(ctx, p.clip, i, k, json!(v))?;
+            }
+            Ok(json!({"clip": p.clip, "crop": edges.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>()}))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Blend {
+        clips: Vec<u64>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        opacity: Option<f64>,
+    }
+    r.function("compose", "blend", "Opacity % and blend mode (Normal, Multiply, Screen, Overlay…; see compose.state) of clips over what is below them")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "mode": {"type": "string"}, "opacity": {"type": "number"}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Blend| {
+            if let Some(m) = &p.mode
+                && !BLENDS.iter().any(|b| b.eq_ignore_ascii_case(m))
+            {
+                return Err(ApiError::bad_params(format!("unknown blend `{m}`; one of {}", BLENDS.join(", "))));
+            }
+            let mode = p.mode.as_ref().and_then(|m| BLENDS.iter().find(|b| b.eq_ignore_ascii_case(m)));
+            for &clip in &p.clips {
+                if let Some(m) = mode {
+                    set_param(ctx, clip, "opacity", "blend", json!(m))?;
+                }
+                if let Some(o) = p.opacity {
+                    set_param(ctx, clip, "opacity", "opacity", json!(o.clamp(0.0, 100.0)))?;
+                }
+            }
+            Ok(json!({"clips": p.clips, "blend": mode, "opacity": p.opacity}))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Key {
+        clip: u64,
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        strength: Option<f64>,
+    }
+    r.function("compose", "chromaKey", "Green screen: make a colour (`color` #rrggbb, default green) transparent so the track below shows; `strength` 0–100 how much around it goes (default 50); on=false removes it")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}, "on": {"type": "boolean"}, "color": {"type": "string"}, "strength": {"type": "number"}}, "required": ["clip"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Key| {
+            if p.on == Some(false) {
+                let n = remove_indices(ctx, p.clip, indices_of(&fx_ids(ctx, p.clip)?, "ultra_key"))?;
+                return Ok(json!({"clip": p.clip, "chromaKey": null, "removed": n}));
+            }
+            if let Some(c) = &p.color
+                && !(c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|x| x.is_ascii_hexdigit()))
+            {
+                return Err(ApiError::bad_params("`color` is #rrggbb"));
+            }
+            let fresh = indices_of(&fx_ids(ctx, p.clip)?, "ultra_key").is_empty();
+            let i = ensure(ctx, p.clip, "ultra_key")?;
+            if let Some(c) = &p.color {
+                set_param(ctx, p.clip, i, "key_color", json!(c))?;
+            } else if fresh {
+                set_param(ctx, p.clip, i, "key_color", json!("#00b140"))?;
+            }
+            if let Some(v) = p.strength {
+                set_param(ctx, p.clip, i, "tolerance", json!(v.clamp(0.0, 100.0)))?;
+            }
+            Ok(compose_state(engine(ctx)?, p.clip).unwrap_or(Value::Null))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct MaskP {
+        clip: u64,
+        shape: String,
+        #[serde(default)]
+        size: Option<f64>,
+        #[serde(default)]
+        feather: Option<f64>,
+        #[serde(default)]
+        inverted: Option<bool>,
+        #[serde(default)]
+        center: Option<[f64; 2]>,
+    }
+    r.function("compose", "mask", "Show only part of a clip: shape circle | rectangle | rounded | band (a horizontal strip) | none; size % of the picture (default 60), feather 0–100 (soft edge), inverted (show the outside), center [x%, y%]")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}, "shape": {"enum": ["none", "circle", "rectangle", "rounded", "band"]}, "size": {"type": "number"}, "feather": {"type": "number"}, "inverted": {"type": "boolean"}, "center": {"type": "array", "items": {"type": "number"}}}, "required": ["clip", "shape"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: MaskP| {
+            // One mask per clip, on its Opacity: replace whatever is there.
+            let had = {
+                let s = engine(ctx)?.lock();
+                let seq = s.state.active_sequence.and_then(|id| s.project.sequence(id));
+                seq.and_then(|q| q.video_tracks.iter().flat_map(|t| t.items.iter()).find(|i| i.id.0 == p.clip)).and_then(|i| i.effects.iter().find(|e| e.effect == "opacity")).map_or(0, |e| e.masks.len())
+            };
+            for m in (0..had).rev() {
+                run(ctx, "masks.remove", json!({"clip": p.clip, "effect": "opacity", "mask": m}))?;
+            }
+            if p.shape == "none" {
+                return Ok(json!({"clip": p.clip, "mask": null}));
+            }
+            let (w, h) = source_size(engine(ctx)?, p.clip);
+            let frac = p.size.unwrap_or(60.0).clamp(5.0, 150.0) / 100.0;
+            let c = p.center.map_or([w / 2.0, h / 2.0], |[x, y]| [w * x.clamp(0.0, 100.0) / 100.0, h * y.clamp(0.0, 100.0) / 100.0]);
+            let short = w.min(h);
+            let (shape, size, corner) = match p.shape.as_str() {
+                "circle" => ("ellipse", [short * frac, short * frac], None),
+                "rectangle" => ("rectangle", [w * frac, h * frac], None),
+                "rounded" => ("rectangle", [w * frac, h * frac], Some(short * frac * 0.12)),
+                "band" => ("rectangle", [w * 2.0, h * frac * 0.5], None),
+                other => return Err(ApiError::bad_params(format!("unknown shape `{other}`"))),
+            };
+            let mut add = json!({"clip": p.clip, "effect": "opacity", "shape": shape, "center": c, "size": size});
+            if let Some(r) = corner {
+                add["cornerRadius"] = json!(r);
+            }
+            let made = run(ctx, "masks.add", add)?;
+            let feather = p.feather.unwrap_or(20.0).clamp(0.0, 100.0) * short / 400.0;
+            run(ctx, "masks.set", json!({"clip": p.clip, "effect": "opacity", "mask": made["mask"], "name": format!("videolab:{}", p.shape), "feather": feather, "inverted": p.inverted.unwrap_or(false)}))?;
+            Ok(compose_state(engine(ctx)?, p.clip).unwrap_or(Value::Null))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Toggle {
+        clips: Vec<u64>,
+        #[serde(default)]
+        on: Option<bool>,
+        #[serde(default)]
+        amount: Option<f64>,
+    }
+    r.function("compose", "stabilize", "Steady shaky footage (FilmCraft's Warp Stabilizer: it analyses the clip the first time it plays); amount = smoothness % (default 50); on omitted toggles")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "on": {"type": "boolean"}, "amount": {"type": "number"}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Toggle| toggle_effect(ctx, &p.clips, "warp_stabilizer", p.on, p.amount.map(|a| ("smoothness", json!(a.clamp(0.0, 200.0))))))
+        .register();
+
+    r.function("compose", "autoReframe", "Auto reframe: keep the action in view when the clip's shape differs from the canvas (e.g. landscape footage in a 9:16 video); on omitted toggles")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "on": {"type": "boolean"}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Toggle| toggle_effect(ctx, &p.clips, "auto_reframe", p.on, None))
+        .register();
+
+    r.function("compose", "voices", "Voice effects: key, name").effects(Effects::ReadOnly).handler(|_, _| Ok(json!(VOICES.iter().map(|(k, n, _)| json!({"key": k, "name": n})).collect::<Vec<_>>()))).register();
+
+    #[derive(Deserialize)]
+    struct Voice {
+        clips: Vec<u64>,
+        key: String,
+    }
+    r.function("compose", "voice", "Put a voice effect on sound clips (chipmunk, deep, echo, hall…; see compose.voices), replacing the one they had; key `none` removes it")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "key": {"type": "string"}}, "required": ["clips", "key"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Voice| {
+            let chain: Vec<(String, serde_json::Map<String, Value>)> = match VOICES.iter().find(|v| v.0 == p.key) {
+                Some((_, _, c)) => serde_json::from_str(c).unwrap_or_default(),
+                None if p.key == "none" => Vec::new(),
+                None => return Err(ApiError::bad_params(format!("unknown voice effect `{}`; see compose.voices", p.key))),
+            };
+            for &clip in &p.clips {
+                let old: Vec<usize> = fx_ids(ctx, clip)?.iter().enumerate().filter(|(_, e)| VOICE_EFFECTS.contains(&e.as_str())).map(|(i, _)| i).collect();
+                remove_indices(ctx, clip, old)?;
+                for (effect, params) in &chain {
+                    let made = run(ctx, "effects.apply", json!({"clips": [clip], "effect": effect}))?;
+                    let i = made["applied"][0]["index"].clone();
+                    for (k, v) in params {
+                        set_param(ctx, clip, i.clone(), k, v.clone())?;
+                    }
+                }
+            }
+            Ok(json!({"clips": p.clips, "voice": p.key}))
+        })
+        .register();
+
+    r.function("compose", "enhanceVoice", "Clean up speech: reduce background noise and enhance the voice (FilmCraft's DeNoise + Enhance Speech); on omitted toggles")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}, "on": {"type": "boolean"}, "amount": {"type": "number"}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Toggle| {
+            let r = toggle_effect(ctx, &p.clips, "denoise", p.on, p.amount.map(|a| ("amount", json!(a.clamp(0.0, 100.0)))))?;
+            let on: Vec<bool> = r.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().map(|x| x["on"] == true).collect();
+            for (&clip, on) in p.clips.iter().zip(on) {
+                toggle_effect(ctx, &[clip], "speech_enhance", Some(on), None)?;
+            }
+            Ok(r)
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Clips {
+        clips: Vec<u64>,
+    }
+    r.function("compose", "detachAudio", "Detach clips' sound: picture and sound become separate clips, to move, trim or delete one without the other (again on a detached pair does nothing)")
+        .params(json!({"type": "object", "properties": {"clips": {"type": "array", "items": {"type": "integer"}}}, "required": ["clips"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Clips| {
+            let linked: Vec<u64> = {
+                let s = engine(ctx)?.lock();
+                let seq = s.state.active_sequence.and_then(|id| s.project.sequence(id));
+                p.clips.iter().copied().filter(|c| seq.and_then(|q| q.all_tracks().flat_map(|t| t.items.iter()).find(|i| i.id.0 == *c)).is_some_and(|i| i.link.is_some())).collect()
+            };
+            if linked.is_empty() {
+                return Ok(json!({"detached": []}));
+            }
+            run(ctx, "clip.link", json!({"clips": linked}))?;
+            Ok(json!({"detached": linked}))
+        })
+        .register();
+
+    r.function("compose", "duplicate", "Duplicate a clip (with its effects) right after itself, pushing what follows later")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}}, "required": ["clip"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: One| {
+            let c = clip_json(ctx, p.clip)?;
+            let end = secs(&c["end"]);
+            let back = secs(&run(ctx, "sequence.inspect", json!({}))?["playhead"]);
+            run(ctx, "timeline.select", json!({"clips": [p.clip]}))?;
+            run(ctx, "edit.copy", json!({}))?;
+            run(ctx, "playhead.set", json!({"seconds": end}))?;
+            let r = run(ctx, "edit.pasteInsert", json!({}));
+            run(ctx, "playhead.set", json!({"seconds": back}))?;
+            r
+        })
+        .register();
+}
+
+/// Turn a one-instance effect on (`on` omitted: toggle) for each clip, with an optional parameter.
+fn toggle_effect(ctx: &Ctx, clips: &[u64], effect: &str, on: Option<bool>, param: Option<(&str, Value)>) -> ApiResult<Value> {
+    let mut out = Vec::new();
+    for &clip in clips {
+        let at = indices_of(&fx_ids(ctx, clip)?, effect);
+        let want = on.unwrap_or(at.is_empty() || param.is_some());
+        if !want {
+            remove_indices(ctx, clip, at)?;
+            out.push(json!({"clip": clip, "on": false}));
+            continue;
+        }
+        let i = ensure(ctx, clip, effect)?;
+        if let Some((k, v)) = &param {
+            set_param(ctx, clip, i, k, v.clone())?;
+        }
+        out.push(json!({"clip": clip, "on": true}));
+    }
+    Ok(json!(out))
+}
+
+// ----------------------------------------------------------------------------------- project
+
+fn register_project(r: &mut Registry) {
+    r.area("project", "the video as a whole: canvas (aspect ratio: 9:16, 16:9, 1:1…), close gaps");
+
+    r.function("project", "canvas", "The canvas: width, height, ratio, and the ratios offered")
+        .effects(Effects::ReadOnly)
+        .handler(|ctx, _| {
+            let st = run(ctx, "sequence.settings", json!({}))?;
+            let (w, h) = (st["settings"]["width"].as_u64().unwrap_or(1080), st["settings"]["height"].as_u64().unwrap_or(1920));
+            let ratio = CANVAS.iter().find(|(_, a, b)| w * u64::from(*b) == h * u64::from(*a)).map(|c| c.0);
+            Ok(json!({"width": w, "height": h, "ratio": ratio, "ratios": CANVAS.iter().map(|c| c.0).collect::<Vec<_>>()}))
+        })
+        .register();
+
+    #[derive(Deserialize)]
+    struct Canvas {
+        ratio: String,
+        #[serde(default)]
+        fit: Option<bool>,
+    }
+    r.function("project", "setCanvas", "Change the canvas to an aspect ratio (9:16, 16:9, 1:1, 4:5, 4:3, 3:4, 21:9), keeping its long side; clips are fitted to the new frame unless fit=false")
+        .params(json!({"type": "object", "properties": {"ratio": {"type": "string"}, "fit": {"type": "boolean"}}, "required": ["ratio"]}))
+        .effects(Effects::Revertible)
+        .typed(|ctx, p: Canvas| {
+            let Some(&(_, a, b)) = CANVAS.iter().find(|c| c.0 == p.ratio) else {
+                return Err(ApiError::bad_params(format!("unknown ratio `{}`; one of {}", p.ratio, CANVAS.iter().map(|c| c.0).collect::<Vec<_>>().join(", "))));
+            };
+            let st = run(ctx, "sequence.settings", json!({}))?;
+            let long = st["settings"]["width"].as_u64().unwrap_or(1080).max(st["settings"]["height"].as_u64().unwrap_or(1920)) as u32;
+            let even = |x: f64| ((x / 2.0).round() as u32 * 2).max(2);
+            let (w, h) = if a >= b { (long, even(f64::from(long) * f64::from(b) / f64::from(a))) } else { (even(f64::from(long) * f64::from(a) / f64::from(b)), long) };
+            run(ctx, "sequence.settings", json!({"width": w, "height": h}))?;
+            if p.fit != Some(false) {
+                let seq = run(ctx, "sequence.inspect", json!({}))?;
+                let clips: Vec<u64> = seq["video"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().flat_map(|t| t["items"].as_array().cloned().unwrap_or_default()).filter(|c| c["kind"] != "graphic").filter_map(|c| c["clip"].as_u64()).collect();
+                if !clips.is_empty() {
+                    // Titles and graphics keep their layout; footage and stills fit the new frame.
+                    let _ = run(ctx, "clip.fitToFrame", json!({"clips": clips}));
+                }
+            }
+            Ok(json!({"width": w, "height": h, "ratio": p.ratio}))
+        })
+        .register();
+
+    r.function("project", "closeGaps", "Close the gaps on the main video track: its clips (with their linked sound) slide together from the start, as phone editors keep the main track; overlays and other tracks stay where they are")
+        .effects(Effects::Revertible)
+        .handler(|ctx, _| {
+            let (track, clips) = {
+                let s = engine(ctx)?.lock();
+                let q = s.state.active_sequence.and_then(|id| s.project.sequence(id)).ok_or_else(|| ApiError::not_found("no open sequence"))?;
+                let Some(t) = q.video_tracks.first() else { return Ok(json!({"moved": 0})) };
+                let mut items: Vec<(u64, filmcraft_time::Tick, filmcraft_time::Tick)> = t.items.iter().map(|i| (i.id.0, i.start, i.end())).collect();
+                items.sort_by_key(|i| i.1);
+                (t.id.0, items)
+            };
+            // Each clip to where the one before it ends; all in one move (one undo step).
+            let mut at = filmcraft_time::Tick::ZERO;
+            let mut moves = Vec::new();
+            for (id, start, end) in clips {
+                if start > at {
+                    moves.push(json!({"clip": id, "time": at.0, "track": track}));
+                }
+                at = at.max(end - (start - at).max(filmcraft_time::Tick::ZERO));
+            }
+            if moves.is_empty() {
+                return Ok(json!({"moved": 0}));
+            }
+            let n = moves.len();
+            run(ctx, "timeline.move", json!({"moves": moves}))?;
+            Ok(json!({"moved": n}))
+        })
+        .register();
 }
 
 #[cfg(test)]

@@ -100,6 +100,32 @@ pub fn register() {
     filmcraft_codecs::hw::set_hw_backend("MediaCodec");
 }
 
+/// Start this process's binder thread pool. MediaCodec's codecs run in the media service and
+/// hand results back over binder: without threads to receive them a codec takes input and never
+/// returns a picture or packet. App processes have the pool already (the Java runtime starts it);
+/// a plain native process — the `videolab` CLI run from adb — must start it before using a codec.
+/// `ABinderProcess_startThreadPool` is on every device but not in the NDK's link stubs, so it is
+/// looked up at run time; when it is missing the CLI just keeps FilmCraft's software codecs.
+pub fn start_binder_thread_pool() {
+    // SAFETY: dlopen/dlsym with NUL-terminated names; the symbol, when found, is libbinder_ndk's
+    // `void ABinderProcess_startThreadPool(void)`, callable from any thread (again: a no-op).
+    #[allow(unsafe_code)]
+    unsafe {
+        let lib = libc::dlopen(c"libbinder_ndk.so".as_ptr(), libc::RTLD_NOW);
+        if lib.is_null() {
+            log::warn!("libbinder_ndk.so not found: hardware codecs will not answer this process");
+            return;
+        }
+        let f = libc::dlsym(lib, c"ABinderProcess_startThreadPool".as_ptr());
+        if f.is_null() {
+            log::warn!("ABinderProcess_startThreadPool not found: hardware codecs will not answer this process");
+            return;
+        }
+        let start: extern "C" fn() = std::mem::transmute(f);
+        start();
+    }
+}
+
 pub struct MediaCodecDecoder {
     codec: MediaCodec,
     info: NalStreamInfo,

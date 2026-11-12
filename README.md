@@ -101,11 +101,14 @@ cargo run -p videolab-cli -- script cut.js --root ./workspace --out-dir out/
 * **Editor:** preview (wgpu/Vulkan or CPU, shown bottom-left), transport, a phone timeline with a
   fixed centre playhead (drag to scrub, pinch to zoom, tap to select, drag handles to trim),
   filmstrips and waveforms; tool bar: Media, Audio, Text, Templates, Captions (manual, **auto
-  captions**, remove pauses / “um”s), Effects, Filters, Adjust, **Text to speech**, Split, Agent;
+  captions**, remove pauses / “um”s), Effects, Filters, Adjust, **Text to speech**, **Canvas**
+  (9:16, 16:9, 1:1, 4:5…), **Close gaps**, Split, Agent;
   with a clip selected: Split, Volume, Speed (with **smooth slow motion**), Fade, Transition,
   **Filters, Effects, Adjust, Transform** (keyframes: the ◇ by the transport), **Freeze,
-  Reverse, Mirror, Rotate, Auto cut**; on sound: **Auto duck, Loudness**. Export
-  480p/720p/1080p MP4 or GIF, then share. All of these are registry functions (`look`, `clip`,
+  Reverse, Mirror, Rotate, Crop, Mask, Opacity / blend, Chroma key, Stabilize, Auto reframe,
+  Auto cut, Voice effects, Detach audio, Duplicate**; on sound: **Auto duck, Loudness, Voice
+  effects, Enhance voice**. Export 480p/720p/1080p MP4 (the phone's hardware H.264 encoder) or
+  GIF, then share. All of these are registry functions (`look`, `clip`, `compose`, `project`,
   `audio`, `speech`), so agents can use them too.
 * **Agent:** Settings → Agent → your Anthropic API key (sealed with an Android Keystore key).
 

@@ -182,12 +182,14 @@ impl VideoLab {
     /// `cli_path`: the bundled `libfilmcraft_cli.so` (empty: none). `gpu`: try FilmCraft's wgpu
     /// compositor (Vulkan) for previews and exports; it is probed first and stays off if it fails.
     #[uniffi::constructor]
-    pub fn new(root: String, temp_dir: String, cli_path: String, gpu: bool) -> Result<Arc<Self>> {
+    /// `read_roots`: folders media may be imported from in place (read-only), e.g. shared storage.
+    pub fn new(root: String, temp_dir: String, cli_path: String, gpu: bool, read_roots: Vec<String>) -> Result<Arc<Self>> {
         let opts = LabOptions {
             gpu,
             temp_dir: Some(PathBuf::from(temp_dir)).filter(|p| !p.as_os_str().is_empty()),
             control_port: 0,
             cli_path: Some(PathBuf::from(cli_path)).filter(|p| !p.as_os_str().is_empty()),
+            read_roots: read_roots.into_iter().filter(|r| !r.is_empty()).map(PathBuf::from).collect(),
         };
         Ok(Arc::new(Self { lab: Lab::new(Path::new(&root), &opts)? }))
     }

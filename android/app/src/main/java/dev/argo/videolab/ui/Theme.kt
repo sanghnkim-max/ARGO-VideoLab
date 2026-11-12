@@ -100,6 +100,17 @@ object Sym {
     @DrawableRes val folder = R.drawable.ic_sym_folder_open
     @DrawableRes val templates = R.drawable.ic_sym_dashboard_customize
     @DrawableRes val swap = R.drawable.ic_sym_swap_horiz
+    @DrawableRes val crop = R.drawable.ic_sym_crop
+    @DrawableRes val mask = R.drawable.ic_sym_vignette
+    @DrawableRes val opacity = R.drawable.ic_sym_opacity
+    @DrawableRes val chromaKey = R.drawable.ic_sym_format_color_reset
+    @DrawableRes val stabilize = R.drawable.ic_sym_video_stable
+    @DrawableRes val reframe = R.drawable.ic_sym_crop_free
+    @DrawableRes val voice = R.drawable.ic_sym_voice_selection
+    @DrawableRes val duplicate = R.drawable.ic_sym_content_copy
+    @DrawableRes val detach = R.drawable.ic_sym_link_off
+    @DrawableRes val canvas = R.drawable.ic_sym_aspect_ratio
+    @DrawableRes val closeGaps = R.drawable.ic_sym_space_bar
 }
 
 @Composable

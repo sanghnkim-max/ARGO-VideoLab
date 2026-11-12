@@ -76,6 +76,14 @@ are also in `files/VideoLab/.videolab/control.json` (app-private) for adb workfl
   layout whatever format is asked for, which the CPU cannot read. Parameter sets are sent
   in-band. A picture that cannot be read hands the stream to software at once; a session that
   produces nothing latches hardware decoding off for the run.
+* **Export encoding:** `videolab-core::mediacodec_enc` puts the phone's hardware H.264 encoder
+  in front of FilmCraft's software one through FilmCraft's encoder seam
+  (`filmcraft_export::register_encoder`), as FilmCraft's NVENC / VideoToolbox backends do: it
+  takes an export only when it asks for hardware encoding (`export.start` always does) and suits
+  it (MP4/MOV, 8-bit SDR, one pass, progressive), and declines otherwise (the software encoder
+  takes it). Pictures go in as NV12 (or I420) in the codec's buffers, converted with FilmCraft's
+  BT.709 limited-range conversion; no B-frames; parameter sets go to `avcC`, samples are
+  length-prefixed.
 * **Playback:** `Player.kt` — the program mix (`Engine::mix`, FilmCraft's `previews.mix_layout`)
   streamed to an `AudioTrack`; the clock is its presentation timestamp (output latency
   included). Frames are on the sequence's grid: a render stage makes each one ahead of time at
@@ -109,6 +117,11 @@ the app's buttons, the agent and MCP alike:
 | Freeze, reverse, smooth slow-mo, mirror, rotate, auto cut | `clip.*` | `clip.insertFrameHoldSegment`, `clip.speedDuration` (optical flow), `horizontal_flip`, Motion rotation, `clip.sceneEditDetection` |
 | Auto duck, loudness | `audio.duck`, `audio.normalize` | Essential Sound types, `generateDucking`, `autoMatch` |
 | Text to speech | `audio.narrate`, `audio.voices` | `tts.create` (built-in voices) into `media/narration/` |
+| Crop, opacity + blend, chroma key, mask | `compose.crop/blend/chromaKey/mask`, `compose.state` | `crop`, Opacity `blend`, `ultra_key`, `masks.add/set` on Opacity (one mask, named by shape) |
+| Stabilize, auto reframe | `compose.stabilize`, `compose.autoReframe` | `warp_stabilizer`, `auto_reframe` (analysed on first play) |
+| Duplicate, detach audio | `compose.duplicate`, `compose.detachAudio` | `edit.copy` + `edit.pasteInsert` after the clip; `clip.link` (unlink) |
+| Voice effects, enhance voice | `compose.voice(s)`, `compose.enhanceVoice` | `pitch_shifter`, `delay`, `studio_reverb`; `denoise` + `speech_enhance` |
+| Canvas, close gaps | `project.canvas/setCanvas`, `project.closeGaps` | `sequence.settings` + `clip.fitToFrame`; one `timeline.move` packing the main track |
 | Auto captions, remove pauses / fillers | `speech.*` | Whisper (candle, CPU) `sequence.transcribe`, `transcript.createCaptions/removePauses/removeFillers` |
 
 Whisper is the `whisper` feature of `filmcraft-engine`. Model files come from FilmCraft's own

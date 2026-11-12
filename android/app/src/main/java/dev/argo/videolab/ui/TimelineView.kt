@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -37,7 +38,9 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -51,6 +54,7 @@ import dev.argo.videolab.core.Clip
 import dev.argo.videolab.core.ClipKind
 import dev.argo.videolab.core.Lab
 import dev.argo.videolab.core.Timeline
+import dev.argo.videolab.core.Track
 import dev.argo.videolab.core.formatTime
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
@@ -66,13 +70,24 @@ import kotlin.math.roundToInt
 private data class TrimDrag(val clip: Long, val edge: String, val delta: Double)
 
 /** One drawn row: a track and where it sits. */
-private data class Row(val clips: List<Clip>, val top: Float, val height: Float, val main: Boolean)
+private data class Row(val clips: List<Clip>, val top: Float, val height: Float, val main: Boolean, val track: Track?, val video: Boolean)
+
+/** Where a dragged clip would land: a track (by id), a new track, or its own track (null). */
+private sealed interface Drop {
+    data class OnTrack(val id: Long) : Drop
+    data class NewTrack(val reuse: Long?) : Drop
+}
+
+/** A clip being moved (long press, then drag): it follows the finger until release. */
+private data class ClipDrag(val clip: Clip, val video: Boolean, val start: Double, val y: Float, val drop: Drop?)
 
 /**
  * The phone timeline: the playhead stays in the middle and the tracks slide under it.
  *
  *  * one-finger drag scrubs (with fling); pinch zooms; tap selects a clip (or clears);
  *  * the selected clip shows handles at both ends; dragging one trims that edge;
+ *  * long-press a clip and drag to move it in time or onto another track of its kind; drop it
+ *    above the top video row (sound: below the bottom audio row) for a new track;
  *  * rows from the top: titles and overlays (V2+), the main track (V1) as a filmstrip, then sound
  *    (linked audio in blue, music and other audio in green) with waveforms.
  */
@@ -88,6 +103,8 @@ fun TimelineView(
     onScrubEnd: (Double) -> Unit,
     onSelect: (Long?) -> Unit,
     onTrim: (Long, String, Double) -> Unit,
+    /** Move a clip to start at the given seconds; the track is an id, "new", or null (its own). */
+    onMove: (Long, Double, Any?) -> Unit,
     onAdd: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -98,6 +115,8 @@ fun TimelineView(
     // Pixels per second; starts so a few seconds fill the screen.
     var pps by remember { mutableFloatStateOf(with(density) { 64.dp.toPx() }) }
     var trim by remember { mutableStateOf<TrimDrag?>(null) }
+    var moving by remember { mutableStateOf<ClipDrag?>(null) }
+    val haptics = LocalHapticFeedback.current
     val current by rememberUpdatedState(playhead)
     val tl by rememberUpdatedState(timeline)
     val sel by rememberUpdatedState(selected)
@@ -112,11 +131,27 @@ fun TimelineView(
         val out = mutableListOf<Row>()
         var y = rulerH + gap
         // Overlays and titles above the main track, top track first.
-        t.videoTracks.drop(1).reversed().filter { it.clips.isNotEmpty() }.forEach { out += Row(it.clips, y, rowH, false); y += rowH + gap }
+        t.videoTracks.drop(1).reversed().filter { it.clips.isNotEmpty() }.forEach { out += Row(it.clips, y, rowH, false, it, true); y += rowH + gap }
         val main = t.videoTracks.firstOrNull()
-        out += Row(main?.clips.orEmpty(), y, mainH, true); y += mainH + gap
-        t.audioTracks.filter { it.clips.isNotEmpty() }.forEach { out += Row(it.clips, y, rowH, false); y += rowH + gap }
+        out += Row(main?.clips.orEmpty(), y, mainH, true, main, true); y += mainH + gap
+        t.audioTracks.filter { it.clips.isNotEmpty() }.forEach { out += Row(it.clips, y, rowH, false, it, false); y += rowH + gap }
         return out
+    }
+
+    /**
+     * Where a clip of kind [video] dropped at height [y] lands: above the top video row (sound:
+     * below the bottom audio row) a new track — an empty track past the last used one of that
+     * kind when there is one, else a new one; on a row of its kind, that track; else its own.
+     */
+    fun dropAt(t: Timeline, rowsNow: List<Row>, video: Boolean, y: Float): Drop? {
+        val mine = rowsNow.filter { it.video == video }
+        val tracks = if (video) t.videoTracks else t.audioTracks
+        val lastUsed = tracks.indexOfLast { it.clips.isNotEmpty() }
+        val spare = tracks.drop(lastUsed + 1).firstOrNull { it.clips.isEmpty() }?.id
+        if (mine.isEmpty()) return Drop.NewTrack(spare)
+        if (video && y < mine.first().top) return Drop.NewTrack(spare)
+        if (!video && y > mine.last().top + mine.last().height) return Drop.NewTrack(spare)
+        return mine.firstOrNull { y in (it.top - gap / 2)..(it.top + it.height + gap / 2) }?.track?.let { Drop.OnTrack(it.id) }
     }
 
     BoxWithConstraints(modifier.background(Color(0xFF111114))) {
@@ -142,6 +177,55 @@ fun TimelineView(
                                 abs(down.position.x - (x0 - handleW / 2)) < handleW * 1.4f -> "in"
                                 abs(down.position.x - (x1 + handleW / 2)) < handleW * 1.4f -> "out"
                                 else -> null
+                            }
+                        }
+                    }
+                    // Long-press a clip (not a handle) to move it.
+                    if (handle == null) {
+                        val hitRow = rowsNow.firstOrNull { down.position.y in it.top..(it.top + it.height) }
+                        val tAt = t0 + (down.position.x - cx) / pps
+                        val hit = hitRow?.clips?.firstOrNull { tAt in it.start..it.end }
+                        if (hit != null && hitRow.track != null) {
+                            val long = awaitLongPressOrCancellation(down.id)
+                            if (long != null) {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onSelect(hit.id)
+                                var start = hit.start
+                                var y = long.position.y
+                                moving = ClipDrag(hit, hitRow.video, start, y, null)
+                                // Edges it snaps to: the playhead, 0, and other clips' ends.
+                                val edges = listOf(t0, 0.0) + tl.tracks.flatMap { tr -> tr.clips.filter { it.id != hit.id }.flatMap { listOf(it.start, it.end) } }
+                                val snapPx = 10.dp.toPx()
+                                var raw = start
+                                while (true) {
+                                    val ev = awaitPointerEvent()
+                                    val ch = ev.changes.firstOrNull { it.id == down.id } ?: ev.changes.first()
+                                    if (!ch.pressed) break
+                                    raw = (raw + ch.positionChange().x / pps).coerceAtLeast(0.0)
+                                    y = ch.position.y
+                                    // Snap either edge of the clip to the nearest edge within reach.
+                                    val len = hit.end - hit.start
+                                    val best = edges.flatMap { e -> listOf(e to e, e to e - len) }.minByOrNull { (e, s) -> abs(s - raw) }
+                                    start = if (best != null && abs(best.second - raw) * pps < snapPx) best.second.coerceAtLeast(0.0) else raw
+                                    moving = ClipDrag(hit, hitRow.video, start, y, dropAt(tl, rowsNow, hitRow.video, y))
+                                    ch.consume()
+                                }
+                                val m = moving
+                                moving = null
+                                if (m != null) {
+                                    val track: Any? = when (val d = m.drop) {
+                                        is Drop.NewTrack -> d.reuse ?: "new"
+                                        is Drop.OnTrack -> d.id.takeIf { it != hitRow.track.id }
+                                        null -> null
+                                    }
+                                    if (track != null || abs(m.start - hit.start) > 1e-3) onMove(hit.id, m.start, track)
+                                }
+                                return@awaitEachGesture
+                            }
+                            // Released before the long press: a tap selects the clip.
+                            if (currentEvent.changes.none { it.pressed }) {
+                                onSelect(hit.id)
+                                return@awaitEachGesture
                             }
                         }
                     }
@@ -246,6 +330,29 @@ fun TimelineView(
                         if (x in 0f..size.width) drawTransitionMark(Offset(x, row.top + row.height / 2))
                     }
                 }
+            }
+            // A clip being moved: the target row (or the new-track band) and the clip under the finger.
+            moving?.let { m ->
+                val accent = Accent
+                val h = if (m.video && tl.videoTracks.firstOrNull()?.clips?.any { it.id == m.clip.id } == true) mainH else rowH
+                val x0 = cx + ((m.start - now) * pps).toFloat()
+                val x1 = x0 + ((m.clip.end - m.clip.start) * pps).toFloat()
+                when (val d = m.drop) {
+                    is Drop.NewTrack -> {
+                        val mine = drawn.filter { it.video == m.video }
+                        val bandY = if (m.video) (mine.firstOrNull()?.top ?: (rulerH + gap)) - gap / 2 else (mine.lastOrNull()?.let { it.top + it.height } ?: rulerH) + gap / 2
+                        drawLine(accent, Offset(0f, bandY), Offset(size.width, bandY), strokeWidth = 3.dp.toPx())
+                        val label = measurer.measure("New track", TextStyle(color = accent, fontSize = 10.sp, fontWeight = FontWeight.SemiBold))
+                        drawText(label, topLeft = Offset(8.dp.toPx(), if (m.video) bandY - label.size.height - 2.dp.toPx() else bandY + 2.dp.toPx()))
+                    }
+                    is Drop.OnTrack -> drawn.firstOrNull { it.track?.id == d.id }?.let { r ->
+                        drawRoundRect(accent, Offset(0f, r.top - 2), Size(size.width, r.height + 4), CornerRadius(6.dp.toPx()), style = Stroke(1.5.dp.toPx()))
+                    }
+                    null -> {}
+                }
+                val top = (m.y - h / 2).coerceIn(0f, size.height - h)
+                drawRoundRect(Color.White.copy(alpha = 0.22f), Offset(x0, top), Size(max(x1 - x0, 4f), h), CornerRadius(6.dp.toPx()))
+                drawRoundRect(Color.White, Offset(x0, top), Size(max(x1 - x0, 4f), h), CornerRadius(6.dp.toPx()), style = Stroke(2.dp.toPx()))
             }
             // The playhead.
             drawLine(Playhead, Offset(cx, rulerH * 0.55f), Offset(cx, size.height), strokeWidth = 2.dp.toPx())

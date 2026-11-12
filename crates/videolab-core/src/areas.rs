@@ -530,16 +530,26 @@ fn register_timeline(r: &mut Registry) {
         clip: u64,
         seconds: f64,
         #[serde(default)]
-        track: Option<String>,
+        track: Option<Value>,
     }
-    r.function("timeline", "move", "Move a clip (and its linked sound) to start at `seconds`, optionally onto another track")
-        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}, "seconds": {"type": "number"}, "track": {"type": "string"}}, "required": ["clip", "seconds"]}))
+    r.function("timeline", "move", "Move a clip (and its linked sound) to start at `seconds`, optionally onto another track: its id, a name (\"V2\", \"A3\") or \"new\" (a new track after the last of its kind)")
+        .params(json!({"type": "object", "properties": {"clip": {"type": "integer"}, "seconds": {"type": "number"}, "track": {"type": ["string", "integer"]}}, "required": ["clip", "seconds"]}))
         .effects(Effects::Revertible)
         .typed(|ctx, p: Move| {
-            let mut m = json!({"clip": p.clip, "time": {"seconds": p.seconds}});
-            if let Some(t) = p.track {
-                m["track"] = json!(t);
-            }
+            // FilmCraft's move always names a track: without one, the clip stays on its own.
+            let track = match p.track.filter(|t| !t.is_null()) {
+                Some(t) => t,
+                None => {
+                    let seq = run(ctx, "sequence.inspect", json!({}))?;
+                    ["video", "audio"]
+                        .iter()
+                        .flat_map(|k| seq[*k].as_array().cloned().unwrap_or_default())
+                        .find(|t| t["items"].as_array().is_some_and(|cs| cs.iter().any(|c| c["clip"] == json!(p.clip))))
+                        .map(|t| t["id"].clone())
+                        .ok_or_else(|| ApiError::not_found(format!("no clip {} in the open sequence", p.clip)))?
+                }
+            };
+            let m = json!({"clip": p.clip, "time": {"seconds": p.seconds}, "track": track});
             run(ctx, "timeline.move", json!({"moves": [m]}))
         })
         .register();
@@ -799,7 +809,9 @@ fn register_export(r: &mut Registry) {
             if let Some(dir) = abs.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let mut params = json!({"path": abs.to_string_lossy(), "wait": false, "range": p.range.unwrap_or_else(|| "entire".into())});
+            // The phone's hardware encoder for H.264 (several times faster than FilmCraft's
+            // software one there); exports it cannot take fall back to software.
+            let mut params = json!({"path": abs.to_string_lossy(), "wait": false, "range": p.range.unwrap_or_else(|| "entire".into()), "hardwareEncoding": "auto"});
             if let Some(f) = p.format {
                 params["format"] = json!(f);
             }

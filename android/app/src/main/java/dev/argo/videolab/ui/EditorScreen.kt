@@ -60,7 +60,7 @@ import dev.argo.videolab.core.formatTime
 import kotlinx.coroutines.launch
 
 /** Bottom-bar tools; a non-null tool opens its sheet in place of the bar. */
-enum class Tool { Volume, Speed, Fade, Transition, Text, Templates, Captions, Export, Filters, Effects, Adjust, Transform, Narrate }
+enum class Tool { Volume, Speed, Fade, Transition, Text, Templates, Captions, Export, Filters, Effects, Adjust, Transform, Narrate, Crop, Blend, ChromaKey, Mask, Voice, Canvas }
 
 @Composable
 fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, onImport: (List<Uri>, Boolean) -> Unit) {
@@ -158,6 +158,10 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                                 scope.launch { lab.exec("timeline.select", """{"clips":[${id ?: ""}]}""") }
                             },
                             onTrim = { id, edge, delta -> scope.launch { lab.fn("timeline.trim", """{"clip":$id,"edge":"$edge","delta":$delta}""") } },
+                            onMove = { id, seconds, track ->
+                                val t = when (track) { null -> ""; is String -> ""","track":"$track""""; else -> ""","track":$track""" }
+                                scope.launch { lab.fn("timeline.move", """{"clip":$id,"seconds":$seconds$t}""") }
+                            },
                             onAdd = { pickMedia.launch(arrayOf("video/*", "audio/*", "image/*")) },
                         )
                     } else {
@@ -192,6 +196,16 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                                 ToolButton(Sym.adjust, "Adjust") { tool = Tool.Adjust }
                             }
                             if (clip.kind != ClipKind.Audio) ToolButton(Sym.transform, "Transform") { tool = Tool.Transform }
+                            if (picture) {
+                                ToolButton(Sym.crop, "Crop") { tool = Tool.Crop }
+                                ToolButton(Sym.mask, "Mask") { tool = Tool.Mask }
+                                ToolButton(Sym.opacity, "Opacity") { tool = Tool.Blend }
+                                ToolButton(Sym.chromaKey, "Chroma key") { tool = Tool.ChromaKey }
+                            }
+                            if (clip.kind == ClipKind.Video) {
+                                ToolButton(Sym.stabilize, "Stabilize") { scope.launch { lab.fn("compose.stabilize", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Stabilizing: the first play analyses the clip" else "Stabilize off") } } }
+                                ToolButton(Sym.reframe, "Reframe") { scope.launch { lab.fn("compose.autoReframe", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Auto reframe on" else "Auto reframe off") } } }
+                            }
                             if (clip.kind == ClipKind.Video) {
                                 ToolButton(Sym.freeze, "Freeze") { scope.launch { lab.fn("clip.freeze", """{"clip":${clip.id},"seconds":${playheadNow()}}""") } }
                                 ToolButton(Sym.reverse, "Reverse") { scope.launch { lab.fn("clip.reverse", ids) } }
@@ -201,6 +215,11 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                                 ToolButton(Sym.rotate, "Rotate") { scope.launch { lab.fn("clip.rotate", ids) } }
                             }
                             if (clip.kind == ClipKind.Video) ToolButton(Sym.autoCut, "Auto cut") { scope.launch { lab.fn("clip.autoCut", ids) } }
+                            if (clip.kind != ClipKind.Graphic) ToolButton(Sym.voice, "Voice fx") { tool = Tool.Voice }
+                            if (clip.kind == ClipKind.Video) ToolButton(Sym.detach, "Detach audio") {
+                                scope.launch { lab.fn("compose.detachAudio", ids).onSuccess { lab.showMessage(if ("[]" in it.toString()) "This clip's sound is already separate" else "Sound detached: it is its own clip now") } }
+                            }
+                            ToolButton(Sym.duplicate, "Duplicate") { scope.launch { lab.fn("compose.duplicate", """{"clip":${clip.id}}""") } }
                             if (clip.kind == ClipKind.Audio) {
                                 ToolButton(Sym.duck, "Auto duck") { scope.launch { lab.fn("audio.duck", """{"music":[${clip.id}]}""") } }
                                 ToolButton(Sym.loudness, "Loudness") { scope.launch { lab.fn("audio.normalize", ids) } }
@@ -231,6 +250,8 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             ToolButton(Sym.filters, "Filters") { onClipHere(Tool.Filters) }
                             ToolButton(Sym.adjust, "Adjust") { onClipHere(Tool.Adjust) }
                             ToolButton(Sym.narrate, "Narration") { tool = Tool.Narrate }
+                            ToolButton(Sym.canvas, "Canvas") { tool = Tool.Canvas }
+                            ToolButton(Sym.closeGaps, "Close gaps") { scope.launch { lab.fn("project.closeGaps").onSuccess { if ("\"moved\":0" in it.toString()) lab.showMessage("No gaps on the main track") } } }
                             ToolButton(Sym.split, "Split all") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"all":true}""") } }
                             ToolButton(Sym.agent, "Agent") { agentOpen = true }
                         }

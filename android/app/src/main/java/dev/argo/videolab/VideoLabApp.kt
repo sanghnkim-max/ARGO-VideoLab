@@ -30,7 +30,7 @@ class VideoLabApp : Application() {
 
     val lab: Lab by lazy {
         Lab({
-            VideoLab(workspace.absolutePath, File(cacheDir, "videolab").apply { mkdirs() }.absolutePath, cliPath, settings.gpu).also { core ->
+            VideoLab(workspace.absolutePath, File(cacheDir, "videolab").apply { mkdirs() }.absolutePath, cliPath, settings.gpu, listOf(android.os.Environment.getExternalStorageDirectory().absolutePath)).also { core ->
                 core.setUiCallbacks(UiHost(this))
             }
         }, appScope)
