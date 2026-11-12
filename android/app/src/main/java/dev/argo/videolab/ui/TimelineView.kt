@@ -230,7 +230,14 @@ fun TimelineView(
                     val x1 = cx + ((c.end - now) * pps).toFloat()
                     if (x1 < -handleW || x0 > size.width + handleW || x1 - x0 < 0.5f) continue
                     drawClip(lab, timeline, c, Rect(x0, row.top, x1, row.top + row.height), pps, row.main, measurer)
-                    if (c.id == selected) drawSelection(Rect(x0, row.top, x1, row.top + row.height), handleW)
+                    if (c.id == selected) {
+                        drawSelection(Rect(x0, row.top, x1, row.top + row.height), handleW)
+                        // Keyframe diamonds along the bottom of the selected clip.
+                        for (k in c.keyframes) {
+                            val kx = cx + ((k - now) * pps).toFloat()
+                            if (kx in x0..x1) drawKeyframe(Offset(kx, row.top + row.height - 8.dp.toPx()), 5.dp.toPx())
+                        }
+                    }
                 }
                 if (row.main) {
                     // Transitions on the main track: a small white diamond at each one.
@@ -416,4 +423,13 @@ private fun DrawScope.drawTransitionMark(c: Offset) {
     val p = Path().apply { moveTo(c.x, c.y - s); lineTo(c.x + s, c.y); lineTo(c.x, c.y + s); lineTo(c.x - s, c.y); close() }
     drawPath(p, Color.White)
     drawPath(p, Color(0xFF111114), style = Stroke(1.5.dp.toPx()))
+}
+
+/** A keyframe marker: a white diamond with a dark outline. */
+private fun DrawScope.drawKeyframe(at: Offset, r: Float) {
+    val path = androidx.compose.ui.graphics.Path().apply {
+        moveTo(at.x, at.y - r); lineTo(at.x + r, at.y); lineTo(at.x, at.y + r); lineTo(at.x - r, at.y); close()
+    }
+    drawPath(path, Color.White)
+    drawPath(path, Color(0xFF111114), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()))
 }

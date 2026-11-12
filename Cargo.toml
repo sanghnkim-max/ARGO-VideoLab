@@ -20,6 +20,7 @@ lab-script = { path = "crates/lab-script" }
 lab-mcp = { path = "crates/lab-mcp" }
 videolab-core = { path = "crates/videolab-core" }
 filmcraft-engine = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-speech = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
 filmcraft-automation = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
 filmcraft-gpu = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
 filmcraft-export = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }

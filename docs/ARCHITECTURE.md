@@ -95,6 +95,28 @@ Next, in order of payoff: zero-copy (decoder output imported into wgpu instead o
 planes), a SurfaceView the compositor renders into directly, proxies for sources the hardware
 declines (10-bit HDR).
 
+## 3b. Features (`videolab-core::features`)
+
+The well-known phone-editor features, each a registry function over FilmCraft commands, used by
+the app's buttons, the agent and MCP alike:
+
+| Feature | Function | FilmCraft |
+|---|---|---|
+| Filters | `look.filter`, `look.filterThumbnails` | `lumetri.applyPreset` (18 presets), `lumetri.presetThumbnails` |
+| Adjust | `look.adjust`, `look.state` | a `lumetri` instance with the creative section off (filters are the ones with it on, so the two never overwrite each other) |
+| Effects shelf | `look.effects`, `look.effect` | `effects.apply` + preset parameters (20 curated: blur, glitch, shake, light leaks, glow…) |
+| Transform, keyframes | `clip.transform`, `clip.setTransform`, `clip.keyframe` | Motion / Opacity `effects.setParam`, `effects.addKeyframe`; times read from the project (media time → timeline) |
+| Freeze, reverse, smooth slow-mo, mirror, rotate, auto cut | `clip.*` | `clip.insertFrameHoldSegment`, `clip.speedDuration` (optical flow), `horizontal_flip`, Motion rotation, `clip.sceneEditDetection` |
+| Auto duck, loudness | `audio.duck`, `audio.normalize` | Essential Sound types, `generateDucking`, `autoMatch` |
+| Text to speech | `audio.narrate`, `audio.voices` | `tts.create` (built-in voices) into `media/narration/` |
+| Auto captions, remove pauses / fillers | `speech.*` | Whisper (candle, CPU) `sequence.transcribe`, `transcript.createCaptions/removePauses/removeFillers` |
+
+Whisper is the `whisper` feature of `filmcraft-engine`. Model files come from FilmCraft's own
+catalogue (`speech.modelFiles`: pinned Hugging Face revision, sizes, SHA-256) and are downloaded
+by the app (`SpeechModels.kt`, Android's HTTP stack; FilmCraft's downloader needs JNI set-up for
+Android's certificate checks) into `FILMCRAFT_DATA_DIR/models`, which the core points at
+`.videolab/filmcraft` on Android.
+
 ## 4. Agents
 
 * **In-app agent** (`agent/Agent.kt`): Opus 5.5, adaptive thinking, effort high, prompt caching,

@@ -35,6 +35,11 @@ class Player(private val lab: Lab, private val scope: CoroutineScope) {
     /** The playback clock (seconds) while playing. */
     val position: StateFlow<Double> = _position.asStateFlow()
     /** Frames shown per second over the last second (shown in the editor's status). */
+    /**
+     * Playback resolution as a divisor of the sequence's size (FilmCraft's / Premiere's "playback
+     * resolution"): 1 full, 2 half, 4 quarter. The paused frame stays full quality.
+     */
+    val divisor = MutableStateFlow(2)
     private val _fps = MutableStateFlow(0.0)
     val fps: StateFlow<Double> = _fps.asStateFlow()
 
@@ -127,6 +132,13 @@ class Player(private val lab: Lab, private val scope: CoroutineScope) {
         }
     }
 
+    /** Longest side of playback frames: the sequence's, over [divisor]. */
+    private fun playSide(): Int {
+        val t = lab.state.value.timeline
+        val long = maxOf(t?.width ?: 1920, t?.height ?: 1920)
+        return (long / divisor.value.coerceIn(1, 4)).coerceIn(MIN_SIDE, MAX_SIDE)
+    }
+
     /** A rendered frame waiting for its time. */
     private class Ready(val at: Double, val bitmap: Bitmap, val renderer: String)
 
@@ -149,7 +161,8 @@ class Player(private val lab: Lab, private val scope: CoroutineScope) {
                 val at = n / fps
                 if (at >= duration) break
                 val started = System.nanoTime()
-                val frame = lab.io { it.renderPlayback(at, PLAY_SIDE.toUInt()) }.getOrNull()
+                val side = playSide()
+                val frame = lab.io { it.renderPlayback(at, side.toUInt()) }.getOrNull()
                 cost = cost * 0.8 + (System.nanoTime() - started) / 1e9 * 0.2
                 last = n
                 if (frame == null) continue
@@ -187,8 +200,9 @@ class Player(private val lab: Lab, private val scope: CoroutineScope) {
     }
 
     companion object {
-        /** Longest side of a frame while playing: a quarter of the paused preview's pixels. */
-        const val PLAY_SIDE = 640
+        /** Smallest and largest longest side of a playback frame. */
+        private const val MIN_SIDE = 160
+        private const val MAX_SIDE = 1920
         /** 100 ms of sound per mix call at 48 kHz. */
         private const val CHUNK_FRAMES = 4800
     }

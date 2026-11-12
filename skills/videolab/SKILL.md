@@ -30,6 +30,10 @@ return { name: t.name, duration: t.duration, look };   // {image} objects come b
 Areas: `doc` (timeline, items, preview, contactSheet, undo/redo, save/open/new/demo), `media`
 (files, import, thumbnails, peaks), `timeline` (append, place, split, trim, move, delete, speed,
 volume, fade, transition, select, seek), `text` (add, caption, templates, applyTemplate),
+`look` (filters, filter, adjust, effects, effect, state — filters and adjustments stay
+separate), `clip` (transform, setTransform, keyframe, freeze, reverse, smoothSlowmo, mirror,
+rotate, autoCut), `audio` (duck, normalize, voices, narrate), `speech` (captions,
+removePauses, removeFillers, models — Whisper on the device; needs a downloaded model),
 `export` (start, jobs, cancel), `engine` (FilmCraft's ~700 commands: commands, describe, run,
 batch). `lab.help('<area>')` returns schemas — read it before guessing parameter names.
 
@@ -60,4 +64,16 @@ Export at half size and poll:
 ```js
 const { job } = await lab.export.start({ path: "exports/cut.mp4", scale: 0.5 });
 return job;   // then: lab.export.jobs()
+```
+
+Give the first clip a look, a slow zoom and auto captions:
+
+```js
+const c = (await lab.doc.timeline()).tracks.find(x => x.kind === "video").clips[0];
+await lab.look.filter({ clips: [c.clip], name: "Golden Dusk" });
+await lab.look.adjust({ clip: c.clip, values: { temperature: 20, contrast: 15 } });
+await lab.clip.keyframe({ clip: c.clip, seconds: c.start });
+await lab.clip.setTransform({ clip: c.clip, seconds: c.end - 0.1, scale: 125 });
+await lab.speech.captions({ language: "auto" });   // fails with `unavailable` until a model is downloaded
+return await lab.doc.preview({ seconds: c.start + 1, maxSide: 640 });
 ```

@@ -307,7 +307,7 @@ fn to_rgba(img: &filmcraft_render::Image) -> Result<Rgba, String> {
 
 fn black(width: u32, height: u32) -> Rgba {
     let mut rgba = vec![0u8; width.max(1) as usize * height.max(1) as usize * 4];
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px[3] = 255;
     }
     Rgba { width: width.max(1), height: height.max(1), rgba }

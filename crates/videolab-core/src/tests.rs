@@ -192,3 +192,98 @@ fn gpu_option_renders_either_way() {
     assert_eq!(img.width, 480);
     eprintln!("renderer: {r:?}, gpu status {:?}", lab.gpu_status());
 }
+
+/// The first video clip of the demo and the last sound clip (the score).
+fn demo_clips(lab: &Lab) -> (u64, u64, f64) {
+    let t = lab.timeline();
+    let tracks = t["tracks"].as_array().unwrap();
+    let v = &tracks.iter().find(|x| x["kind"] == "video").unwrap()["clips"][0];
+    let score = tracks.iter().filter(|x| x["kind"] == "audio").flat_map(|x| x["clips"].as_array().unwrap().iter()).last().unwrap();
+    (v["clip"].as_u64().unwrap(), score["clip"].as_u64().unwrap(), v["start"].as_f64().unwrap())
+}
+
+#[test]
+fn filters_and_adjustments_stay_apart() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, _) = demo_clips(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap();
+    call("look.adjust", json!({"clip": clip, "values": {"temperature": 40, "saturation": 140}}));
+    call("look.filter", json!({"clips": [clip], "name": "Golden Dusk"}));
+    call("look.filter", json!({"clips": [clip], "name": "Neutral Mono"}));
+    let s = call("look.state", json!({"clip": clip}));
+    assert_eq!(s["filter"], true, "{s}");
+    assert_eq!(s["adjust"]["temperature"], 40.0, "a filter keeps the adjustments: {s}");
+    let lumetri = |lab: &Lab| lab.engine.execute("sequence.inspect", json!({})).unwrap()["video"][0]["items"][0]["effects"].as_array().unwrap().iter().filter(|e| e["effect"] == "lumetri").count();
+    assert_eq!(lumetri(&lab), 2, "one adjust + one filter (the old filter replaced)");
+    call("look.filter", json!({"clips": [clip], "name": null}));
+    let s = call("look.state", json!({"clip": clip}));
+    assert_eq!((s["filter"].clone(), s["adjust"]["saturation"].clone()), (json!(false), json!(140.0)), "{s}");
+    assert!(lab.call("look.adjust", json!({"clip": clip, "values": {"loudness": 1}}), Source::Agent).is_err());
+}
+
+#[test]
+fn effects_shelf_toggles() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, _) = demo_clips(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap();
+    call("look.effect", json!({"clips": [clip], "key": "glitch"}));
+    call("look.effect", json!({"clips": [clip], "key": "blur"}));
+    assert_eq!(call("look.state", json!({"clip": clip}))["effects"], json!(["glitch", "blur"]));
+    call("look.effect", json!({"clips": [clip], "key": "glitch"}));
+    assert_eq!(call("look.state", json!({"clip": clip}))["effects"], json!(["blur"]));
+    // The blur's strength comes from the shelf, not FilmCraft's default of 0.
+    let fx = lab.engine.execute("sequence.inspect", json!({})).unwrap()["video"][0]["items"][0]["effects"].clone();
+    let blur = fx.as_array().unwrap().iter().find(|e| e["effect"] == "gaussian_blur").unwrap();
+    assert_eq!(blur["params"]["blurriness"]["value"], "Float(40.0)");
+    assert!(lab.call("look.effect", json!({"clips": [clip], "key": "nope"}), Source::Agent).is_err());
+}
+
+#[test]
+fn keyframes_land_where_asked_and_toggle() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, start) = demo_clips(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap();
+    assert_eq!(call("clip.keyframe", json!({"clip": clip, "seconds": start + 1.0}))["added"], true);
+    call("clip.setTransform", json!({"clip": clip, "seconds": start + 3.0, "scale": 150}));
+    let times = |lab: &Lab| lab.timeline()["tracks"].as_array().unwrap().iter().flat_map(|t| t["clips"].as_array().unwrap().clone()).find(|c| c["clip"] == json!(clip)).unwrap()["keyframes"].clone();
+    let k = times(&lab);
+    let k: Vec<f64> = k.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(k.len(), 2, "{k:?}");
+    assert!((k[0] - (start + 1.0)).abs() < 0.05 && (k[1] - (start + 3.0)).abs() < 0.05, "timeline seconds: {k:?}");
+    let at = |s: f64| call("clip.transform", json!({"clip": clip, "seconds": s}))["scale"].as_f64().unwrap();
+    assert!((at(start + 3.0) - 150.0).abs() < 0.5, "the keyframed value at its time: {}", at(start + 3.0));
+    assert!(at(start + 2.0) > 100.5 && at(start + 2.0) < 149.5, "in between, interpolated: {}", at(start + 2.0));
+    // Rotating an animated clip turns every keyframe, adding none.
+    let n = times(&lab).as_array().unwrap().len();
+    call("clip.rotate", json!({"clips": [clip]}));
+    assert_eq!(times(&lab).as_array().unwrap().len(), n, "no new keyframe");
+    assert!((call("clip.transform", json!({"clip": clip, "seconds": start + 1.0}))["rotation"].as_f64().unwrap() - 90.0).abs() < 0.01);
+    assert_eq!(call("clip.keyframe", json!({"clip": clip, "seconds": start + 1.0}))["added"], false);
+    assert_eq!(times(&lab).as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn clip_tools_and_sound() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, score, start) = demo_clips(&lab);
+    let call = |f: &str, p: Value| lab.call(f, p, Source::Agent).unwrap();
+    assert_eq!(call("clip.mirror", json!({"clips": [clip]}))[0]["mirrored"], true);
+    assert_eq!(call("clip.mirror", json!({"clips": [clip]}))[0]["mirrored"], false);
+    assert_eq!(call("clip.rotate", json!({"clips": [clip]}))[0]["rotation"], 90.0);
+    call("clip.fit", json!({"clips": [clip], "mode": "fill"}));
+    call("clip.fit", json!({"clips": [clip]}));
+    assert_eq!(call("clip.reverse", json!({"clips": [clip]}))[0]["reverse"], true);
+    let before = lab.timeline()["duration"].as_f64().unwrap();
+    call("clip.freeze", json!({"clip": clip, "seconds": start + 1.0, "duration": 2.0}));
+    let after = lab.timeline()["duration"].as_f64().unwrap();
+    assert!((after - before - 2.0).abs() < 0.1, "freeze frame adds 2 s: {before} -> {after}");
+    let duck = call("audio.duck", json!({"music": [score]}));
+    assert!(!duck["clips"][0]["keyframes"].as_array().unwrap().is_empty(), "{duck}");
+    let n = call("audio.narrate", json!({"text": "Hello there", "seconds": 1.0}));
+    assert!(n["path"].as_str().unwrap().contains("media/narration/"), "{n}");
+    assert!(lab.call("audio.narrate", json!({"text": "  "}), Source::Agent).is_err());
+}

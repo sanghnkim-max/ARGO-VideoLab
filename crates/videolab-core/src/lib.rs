@@ -27,6 +27,7 @@
 pub mod areas;
 pub mod control;
 pub mod engine;
+pub mod features;
 mod hub;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
@@ -158,7 +159,8 @@ impl Lab {
     ///
     /// Process-wide effects, once per process in practice: the working directory becomes the
     /// workspace (engine paths that bypass `Services` resolve there), `TMPDIR` becomes
-    /// `temp_dir`, and `FILMCRAFT_CONTROL_TOKEN` is set to this core's control token, which
+    /// `temp_dir`, `FILMCRAFT_DATA_DIR` defaults to `.videolab/filmcraft` where FilmCraft has no data
+    /// folder (Android), and `FILMCRAFT_CONTROL_TOKEN` is set to this core's control token, which
     /// FilmCraft's bridge client reads from the environment.
     pub fn new(root: &Path, options: &LabOptions) -> Result<Self> {
         for d in [MEDIA_DIR, EXPORTS_DIR, PROJECTS_DIR] {
@@ -177,6 +179,14 @@ impl Lab {
         if options.temp_dir.is_some() && std::env::var_os("TMPDIR").is_none_or(|t| Path::new(&t) != temp) {
             set_env("TMPDIR", &temp.to_string_lossy());
         }
+        // FilmCraft's data folder (speech models, voices, presets): its desktop locations do not
+        // exist on Android, so it lives in the workspace's private folder there.
+        let own_data = root.join(".videolab").join("filmcraft");
+        if std::env::var_os(DATA_DIR_ENV).is_none() && (cfg!(target_os = "android") || filmcraft_engine::autosave::default_data_dir().is_none()) {
+            std::fs::create_dir_all(&own_data)?;
+            set_env(DATA_DIR_ENV, &own_data.to_string_lossy());
+        }
+        let owns_prefs = std::env::var_os(DATA_DIR_ENV).is_some_and(|d| Path::new(&d) == own_data);
 
         register_hardware_decoders();
         let gpu_ok = options.gpu && gpu_works();
@@ -185,6 +195,9 @@ impl Lab {
         }
         let services = Arc::new(services::WorkspaceServices::new(root.clone(), Some(temp.clone())));
         let engine = Arc::new(Engine::new(services));
+        if owns_prefs {
+            phone_defaults(&engine, &own_data);
+        }
         engine.set_gpu(gpu_ok);
 
         let sink = Arc::new(ForwardingSink::default());
@@ -314,6 +327,7 @@ impl Lab {
         match self.engine.execute("sequence.inspect", json!({})) {
             Ok(seq) => {
                 let mut t = areas::timeline_projection(&seq);
+                features::add_keyframes(&self.engine, &mut t);
                 // FilmCraft's document epoch: item ids are reused across projects, so anything the
                 // UI caches by item (filmstrips, waveforms) belongs to one epoch.
                 if let Some(o) = t.as_object_mut() {
@@ -339,9 +353,18 @@ impl Lab {
     /// A playback frame: frames before `seconds` are late (`filmcraft_media::cancel::with_catch_up`
     /// with a zero margin, what FilmCraft's player passes), so pictures only they reference are
     /// skipped (a 60 fps clip in a 30 fps sequence decodes about half its samples).
+    ///
+    /// Below the sequence's size (reduced playback resolution) decoding is in draft mode, as
+    /// FilmCraft's player does: decoders that can take shortcuts on pictures nothing references
+    /// do (the software decoders; hardware ones ignore it).
     pub fn render_playback(&self, seconds: f64, max_side: u32) -> Result<(Rgba, Renderer)> {
         let t = filmcraft_time::Tick::from_seconds_f64(seconds.max(0.0));
-        filmcraft_media::cancel::with_catch_up(Some(filmcraft_time::Tick::ZERO), || self.engine.render(t, max_side)).map_err(LabError::Engine)
+        let full = {
+            let s = self.engine.lock();
+            s.state.active_sequence.and_then(|id| s.project.sequence(id)).map_or(0, |q| q.settings.width.max(q.settings.height))
+        };
+        let draft = max_side < full;
+        filmcraft_media::cancel::with_draft(draft, || filmcraft_media::cancel::with_catch_up(Some(filmcraft_time::Tick::ZERO), || self.engine.render(t, max_side))).map_err(LabError::Engine)
     }
 
     pub fn thumbnails(&self, item: u64, seconds: &[f64], height: u32) -> Result<Vec<Rgba>> {
@@ -529,6 +552,23 @@ fn run_bounded(mut cmd: std::process::Command, timeout: Duration) -> Result<CliO
     Ok(CliOutput { code, stdout, stderr })
 }
 
+/// FilmCraft preferences a phone editor wants, set once in VideoLab's own data folder (never in a
+/// desktop FilmCraft's): clips fit the frame when placed ("Set to frame size"), as phone editors
+/// do; FilmCraft's default (Premiere's) shows a 4K clip at 200% in a 1080p sequence. Set once, so a
+/// later choice (an agent's `prefs.set`) stays.
+fn phone_defaults(engine: &Engine, data: &Path) {
+    let marker = data.join("videolab-defaults-v1");
+    if marker.exists() {
+        return;
+    }
+    if engine.execute("prefs.set", json!({"key": "media.defaultMediaScaling", "value": "setToFrameSize"})).is_ok() {
+        let _ = std::fs::write(&marker, b"media.defaultMediaScaling=setToFrameSize\n");
+    }
+}
+
+/// FilmCraft's data-folder override (`filmcraft_engine::autosave::default_data_dir`).
+const DATA_DIR_ENV: &str = "FILMCRAFT_DATA_DIR";
+
 /// The control token: 32 random bytes as 64 hex characters (the length FilmCraft's control docs
 /// ask for), made once per process and exported as `FILMCRAFT_CONTROL_TOKEN` for FilmCraft's
 /// bridge client, which reads it from the environment.
@@ -549,8 +589,8 @@ fn process_token() -> Result<String> {
 
 /// `std::env::set_var` is `unsafe` in edition 2024 because another thread may read the
 /// environment at the same moment. It runs once per process during the first `Lab::new`, before
-/// that core starts any thread of its own, for the two variables FilmCraft's bridge client and
-/// temp-dir lookups read.
+/// that core starts any thread of its own, for the variables FilmCraft's bridge client and
+/// temp-dir and data-folder lookups read.
 #[allow(unsafe_code)]
 fn set_env(key: &str, value: &str) {
     // SAFETY: called from Lab::new before the core spawns threads; the app creates one core and

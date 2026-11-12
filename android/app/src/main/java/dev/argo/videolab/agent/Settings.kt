@@ -43,6 +43,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("gpu", true)
         set(v) = prefs.edit().putBoolean("gpu", v).apply()
 
+    /** Playback resolution: 1 (full), 2 (half) or 4 (quarter) of the sequence's size. */
+    var playbackDivisor: Int
+        get() = prefs.getInt("playback_divisor", 2).takeIf { it in setOf(1, 2, 4) } ?: 2
+        set(v) = prefs.edit().putInt("playback_divisor", v).apply()
+
     /** The agent also gets FilmCraft's own MCP tools (command_run, render_frame, …) over the bridge. */
     var filmcraftTools: Boolean
         get() = prefs.getBoolean("filmcraft_tools", true)

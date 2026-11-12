@@ -315,8 +315,12 @@ class Agent(private val lab: Lab, private val settings: Settings) {
             You have three ways in to the same document — use whichever fits:
             - `lab_read` / `lab_script`: JavaScript programs against VideoLab's registry, in seconds. Start with
               `await lab.doc.timeline()`; look with `lab.doc.preview` / `lab.doc.contactSheet`; find beats and pauses
-              with `lab.media.peaks`; edit with `lab.timeline.*` and `lab.text.*`; anything else with
-              `lab.engine.run({id, params})` (FilmCraft's ~700 commands). Prefer one program that does many steps.
+              with `lab.media.peaks`; edit with `lab.timeline.*` and `lab.text.*`; looks with `lab.look.*` (filters,
+              adjust, effects shelf); clip tools with `lab.clip.*` (transform + keyframes, freeze, reverse, smooth
+              slow-mo, mirror, rotate, auto cut); sound with `lab.audio.*` (auto duck, loudness, text to speech);
+              speech with `lab.speech.*` (auto captions, remove pauses/fillers — needs the speech model the person
+              downloads from Captions); anything else with `lab.engine.run({id, params})` (FilmCraft's ~700
+              commands). Prefer one program that does many steps.
             - `filmcraft_*` tools: FilmCraft's own MCP server (command_list, command_run, command_batch, doc_inspect,
               render_frame, …). Times there are ticks: 254016000000 per second (most commands also take seconds=).
             - `filmcraft_cli`: FilmCraft's command-line tool on the phone, bridged to the same session.

@@ -155,10 +155,10 @@ impl Watcher {
                 while !flag.load(Ordering::Relaxed) {
                     std::thread::sleep(WATCH_INTERVAL);
                     let Some(core) = core.upgrade() else { break };
-                    if let Ok(mut g) = core.engine.session.try_lock() {
-                        if !g.stepped.is_empty() {
-                            g.pump_jobs(Duration::from_millis(20));
-                        }
+                    if let Ok(mut g) = core.engine.session.try_lock()
+                        && !g.stepped.is_empty()
+                    {
+                        g.pump_jobs(Duration::from_millis(20));
                     }
                     if core.in_flight.load(Ordering::Acquire) == 0 {
                         core.try_notice(Source::Mcp);

@@ -14,19 +14,19 @@ use filmcraft_time::Tick;
 
 use crate::engine::{Engine, Rgba};
 
-fn engine(ctx: &Ctx) -> ApiResult<&Engine> {
+pub(crate) fn engine(ctx: &Ctx) -> ApiResult<&Engine> {
     ctx.state::<Engine>()
 }
 
-fn run(ctx: &Ctx, id: &str, params: Value) -> ApiResult<Value> {
+pub(crate) fn run(ctx: &Ctx, id: &str, params: Value) -> ApiResult<Value> {
     engine(ctx)?.execute(id, params).map_err(ApiError::engine)
 }
 
-fn ticks(seconds: f64) -> i64 {
+pub(crate) fn ticks(seconds: f64) -> i64 {
     Tick::from_seconds_f64(seconds).0
 }
 
-fn secs(t: &Value) -> f64 {
+pub(crate) fn secs(t: &Value) -> f64 {
     t.as_i64().map_or(0.0, |t| Tick(t).seconds())
 }
 
@@ -108,6 +108,7 @@ impl Module for VideoLabModule {
         register_timeline(r);
         register_text(r);
         register_export(r);
+        crate::features::register(r);
     }
 }
 
@@ -206,7 +207,11 @@ fn register_doc(r: &mut Registry) {
 
     r.function("doc", "timeline", "The active sequence, compact: tracks and clips in seconds, transitions, markers, playhead")
         .description("Returns {sequence, name, width, height, fps, duration, playhead, selection, markers, tracks: [{id, name, kind: video|audio, clips: [{clip, item, name, start, end, sourceIn, sourceOut, speed, gainDb, effects, link}], transitions}]}. Times in seconds. `clip` ids go to timeline.* and engine commands.")
-        .handler(|ctx, _| Ok(timeline_projection(&run(ctx, "sequence.inspect", json!({}))?)))
+        .handler(|ctx, _| {
+            let mut t = timeline_projection(&run(ctx, "sequence.inspect", json!({}))?);
+            crate::features::add_keyframes(engine(ctx)?, &mut t);
+            Ok(t)
+        })
         .register();
 
     r.function("doc", "items", "Project items (media, sequences, graphics) with ids, types and durations")

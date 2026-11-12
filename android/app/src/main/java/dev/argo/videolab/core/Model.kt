@@ -25,6 +25,8 @@ data class Clip(
     val link: Long?,
     val effects: List<String>,
     val kind: ClipKind,
+    /** Transform keyframes (timeline seconds), for the diamonds and the keyframe button. */
+    val keyframes: List<Double> = emptyList(),
 ) {
     val duration get() = end - start
 }
@@ -84,6 +86,7 @@ data class Timeline(
                             link = c.l("link"),
                             effects = (c["effects"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
                             kind = kindOf(video, type, c.l("link") != null),
+                            keyframes = (c["keyframes"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() },
                         )
                     },
                     transitions = (t["transitions"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { x ->

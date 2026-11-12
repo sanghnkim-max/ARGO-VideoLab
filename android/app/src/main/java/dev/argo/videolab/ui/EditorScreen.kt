@@ -60,7 +60,7 @@ import dev.argo.videolab.core.formatTime
 import kotlinx.coroutines.launch
 
 /** Bottom-bar tools; a non-null tool opens its sheet in place of the bar. */
-enum class Tool { Volume, Speed, Fade, Transition, Text, Templates, Captions, Export }
+enum class Tool { Volume, Speed, Fade, Transition, Text, Templates, Captions, Export, Filters, Effects, Adjust, Transform, Narrate }
 
 @Composable
 fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, onImport: (List<Uri>, Boolean) -> Unit) {
@@ -134,6 +134,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                         SymButton(if (playing) Sym.pause else Sym.play, if (playing) "Pause" else "Play", { player.toggle() })
                         SymButton(Sym.skipNext, "Go to end", { player.stop(); commitSeek(timeline?.duration ?: 0.0) })
                         Spacer(Modifier.weight(1f))
+                        KeyframeButton(lab, selected?.let { timeline?.clip(it) }, timeline?.fps ?: 30.0, playheadNow)
                         SymButton(Sym.undo, "Undo", { scope.launch { lab.fn("doc.undo") } })
                         SymButton(Sym.redo, "Redo", { scope.launch { lab.fn("doc.redo") } })
                     }
@@ -144,7 +145,7 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             timeline = timeline,
                             playhead = playheadNow,
                             selected = selected,
-                            modifier = Modifier.fillMaxWidth().height(232.dp),
+                            modifier = Modifier.fillMaxWidth().height(if (tool != null) 168.dp else 232.dp),
                             onScrub = { t ->
                                 if (playing) player.stop()
                                 scrub = t
@@ -183,6 +184,27 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             if (clip.kind != ClipKind.Graphic) ToolButton(Sym.speed, "Speed") { tool = Tool.Speed }
                             ToolButton(Sym.fade, "Fade") { tool = Tool.Fade }
                             if (clip.kind == ClipKind.Video || clip.kind == ClipKind.Still) ToolButton(Sym.transition, "Transition") { tool = Tool.Transition }
+                            val picture = clip.kind == ClipKind.Video || clip.kind == ClipKind.Still
+                            val ids = """{"clips":[${clip.id}]}"""
+                            if (picture) {
+                                ToolButton(Sym.filters, "Filters") { tool = Tool.Filters }
+                                ToolButton(Sym.effects, "Effects") { tool = Tool.Effects }
+                                ToolButton(Sym.adjust, "Adjust") { tool = Tool.Adjust }
+                            }
+                            if (clip.kind != ClipKind.Audio) ToolButton(Sym.transform, "Transform") { tool = Tool.Transform }
+                            if (clip.kind == ClipKind.Video) {
+                                ToolButton(Sym.freeze, "Freeze") { scope.launch { lab.fn("clip.freeze", """{"clip":${clip.id},"seconds":${playheadNow()}}""") } }
+                                ToolButton(Sym.reverse, "Reverse") { scope.launch { lab.fn("clip.reverse", ids) } }
+                            }
+                            if (picture) {
+                                ToolButton(Sym.mirror, "Mirror") { scope.launch { lab.fn("clip.mirror", ids) } }
+                                ToolButton(Sym.rotate, "Rotate") { scope.launch { lab.fn("clip.rotate", ids) } }
+                            }
+                            if (clip.kind == ClipKind.Video) ToolButton(Sym.autoCut, "Auto cut") { scope.launch { lab.fn("clip.autoCut", ids) } }
+                            if (clip.kind == ClipKind.Audio) {
+                                ToolButton(Sym.duck, "Auto duck") { scope.launch { lab.fn("audio.duck", """{"music":[${clip.id}]}""") } }
+                                ToolButton(Sym.loudness, "Loudness") { scope.launch { lab.fn("audio.normalize", ids) } }
+                            }
                             ToolButton(Sym.delete, "Delete") {
                                 scope.launch { lab.fn("timeline.delete", """{"clips":[${clip.id}],"ripple":${clip.kind == ClipKind.Video}}""") }
                                 selected = null
@@ -196,6 +218,19 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                             ToolButton(Sym.text, "Text") { tool = Tool.Text }
                             ToolButton(Sym.templates, "Templates") { tool = Tool.Templates }
                             ToolButton(Sym.captions, "Captions") { tool = Tool.Captions }
+                            // Picture tools on the clip under the playhead (it becomes the selection).
+                            fun onClipHere(t: Tool) {
+                                val here = timeline?.videoTracks?.firstOrNull()?.clips?.firstOrNull { playheadNow() >= it.start && playheadNow() < it.end }
+                                if (here == null) lab.showMessage("Move the playhead over a video clip first") else {
+                                    selected = here.id
+                                    tool = t
+                                    scope.launch { lab.exec("timeline.select", """{"clips":[${here.id}]}""") }
+                                }
+                            }
+                            ToolButton(Sym.effects, "Effects") { onClipHere(Tool.Effects) }
+                            ToolButton(Sym.filters, "Filters") { onClipHere(Tool.Filters) }
+                            ToolButton(Sym.adjust, "Adjust") { onClipHere(Tool.Adjust) }
+                            ToolButton(Sym.narrate, "Narration") { tool = Tool.Narrate }
                             ToolButton(Sym.split, "Split all") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"all":true}""") } }
                             ToolButton(Sym.agent, "Agent") { agentOpen = true }
                         }
@@ -273,6 +308,19 @@ private fun BoxScope.ProgramMonitor(app: VideoLabApp, playing: Boolean, version:
             kotlinx.coroutines.delay(1000)
         }
     }
+    // Playback resolution, as phone editors put it on the monitor: tap to cycle.
+    val divisor by app.player.divisor.collectAsState()
+    Text(
+        when (divisor) { 1 -> "Full"; 2 -> "1/2"; else -> "1/4" },
+        color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x99000000))
+            .clickable {
+                val next = when (divisor) { 1 -> 2; 2 -> 4; else -> 1 }
+                app.player.divisor.value = next
+                app.settings.playbackDivisor = next
+            }
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
     Text(
         buildString {
             append(f?.renderer.orEmpty().uppercase())
@@ -289,5 +337,24 @@ private fun BoxScope.ProgramMonitor(app: VideoLabApp, playing: Boolean, version:
 private fun TimeLabel(playhead: () -> Double, duration: Double) {
     val read by rememberUpdatedState(playhead)
     val text by remember(duration) { derivedStateOf { "${formatTime(read())} / ${formatTime(duration)}" } }
-    Text(text, fontSize = 12.sp, color = Color(0xFFCCCCD2), modifier = Modifier.width(110.dp))
+    Text(text, fontSize = 12.sp, color = Color(0xFFCCCCD2), modifier = Modifier.width(92.dp), maxLines = 1)
+}
+
+/**
+ * CapCut's ◇: adds (or removes) a transform keyframe on the selected clip at the playhead; filled
+ * when the playhead sits on one. Recomposes only when that flips, not every frame.
+ */
+@Composable
+private fun KeyframeButton(lab: dev.argo.videolab.core.Lab, clip: dev.argo.videolab.core.Clip?, fps: Double, playhead: () -> Double) {
+    val scope = rememberCoroutineScope()
+    val read by rememberUpdatedState(playhead)
+    val usable = clip != null && clip.kind != ClipKind.Audio
+    val keys = clip?.keyframes.orEmpty()
+    val onKey by remember(keys, fps) { derivedStateOf { keys.any { kotlin.math.abs(it - read()) < 0.5 / fps } } }
+    SymButton(
+        if (onKey) Sym.keyframeOn else Sym.keyframe,
+        if (onKey) "Remove keyframe" else "Add keyframe",
+        { if (clip != null && usable) scope.launch { lab.fn("clip.keyframe", """{"clip":${clip.id},"seconds":${read()}}""") } },
+        tint = if (!usable) Color(0xFF55555C) else if (onKey) Accent else null,
+    )
 }

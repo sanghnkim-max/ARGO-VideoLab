@@ -13,7 +13,10 @@ workspace = true
 lab-api = { workspace = true }
 lab-script = { workspace = true }
 lab-mcp = { workspace = true }
-filmcraft-engine = { workspace = true }
+# Whisper speech-to-text (pure-Rust candle, CPU) for auto captions. Model files are downloaded by
+# the app (Android's HTTP stack) into FilmCraft's models folder; FilmCraft checks their SHA-256.
+filmcraft-engine = { workspace = true, features = ["whisper"] }
+filmcraft-speech = { workspace = true }
 filmcraft-automation = { workspace = true }
 filmcraft-gpu = { workspace = true }
 filmcraft-export = { workspace = true }

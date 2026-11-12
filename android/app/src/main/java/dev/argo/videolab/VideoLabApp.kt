@@ -35,7 +35,7 @@ class VideoLabApp : Application() {
             }
         }, appScope)
     }
-    val player: Player by lazy { Player(lab, appScope) }
+    val player: Player by lazy { Player(lab, appScope).also { it.divisor.value = settings.playbackDivisor } }
     val agent: Agent by lazy { Agent(lab, settings) }
 
     /** The activity on screen, for screenshots requested over FilmCraft's control channel. */

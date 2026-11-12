@@ -263,11 +263,15 @@ mod tests {
         let (r, mut w) = s.into_split();
         let mut r = tokio::io::BufReader::new(r).lines();
         let mut out = Vec::new();
+        // A connection the server closed may end in a clean EOF or, depending on timing, a reset
+        // on the next write or read: all mean "closed" here.
         for l in lines {
-            w.write_all(format!("{l}\n").as_bytes()).await.unwrap();
-            match r.next_line().await.unwrap() {
-                Some(line) => out.push(serde_json::from_str(&line).unwrap()),
-                None => break,
+            if w.write_all(format!("{l}\n").as_bytes()).await.is_err() {
+                break;
+            }
+            match r.next_line().await {
+                Ok(Some(line)) => out.push(serde_json::from_str(&line).unwrap()),
+                Ok(None) | Err(_) => break,
             }
         }
         out

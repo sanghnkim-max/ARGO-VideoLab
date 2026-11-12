@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -70,7 +71,8 @@ private fun q(s: String) = JsonPrimitive(s).toString()
 
 @Composable
 fun ToolSheet(app: VideoLabApp, tool: Tool, clip: Clip?, playhead: Double, onDone: () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(Color(0xFF151518)).padding(bottom = 8.dp)) {
+    // At most ~a third of a phone screen, scrolling: the preview stays big enough to judge a look.
+    Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).background(Color(0xFF151518)).verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
         when (tool) {
             Tool.Volume -> clip?.let { VolumeSheet(app, it, onDone) }
             Tool.Speed -> clip?.let { SpeedSheet(app, it, onDone) }
@@ -80,6 +82,11 @@ fun ToolSheet(app: VideoLabApp, tool: Tool, clip: Clip?, playhead: Double, onDon
             Tool.Templates -> TemplatesSheet(app, playhead, onDone)
             Tool.Captions -> CaptionSheet(app, playhead, onDone)
             Tool.Export -> ExportSheet(app, onDone)
+            Tool.Filters -> clip?.let { FilterSheet(app, it, onDone) }
+            Tool.Effects -> clip?.let { EffectsSheet(app, it, onDone) }
+            Tool.Adjust -> clip?.let { AdjustSheet(app, it, onDone) }
+            Tool.Transform -> clip?.let { TransformSheet(app, it, playhead, onDone) }
+            Tool.Narrate -> NarrateSheet(app, playhead, onDone)
         }
     }
 }
@@ -104,14 +111,22 @@ private fun SpeedSheet(app: VideoLabApp, clip: Clip, onDone: () -> Unit) {
     // Slider position is log2(speed): -2 (0.25x) .. +2 (4x).
     var pos by remember(clip.id) { mutableFloatStateOf((ln(clip.speed.coerceIn(0.25, 4.0)) / ln(2.0)).toFloat()) }
     var reverse by remember(clip.id) { mutableStateOf(false) }
+    var smooth by remember(clip.id) { mutableStateOf(false) }
     val speed = 2.0.pow(pos.toDouble())
-    fun apply() = scope.launch { app.lab.fn("timeline.speed", """{"clips":[${clip.id}],"percent":${(speed * 100).roundToInt()},"reverse":$reverse}""") }
+    fun apply() = scope.launch {
+        if (smooth && speed < 1.0 && !reverse) app.lab.fn("clip.smoothSlowmo", """{"clips":[${clip.id}],"percent":${(speed * 100).roundToInt()}}""")
+        else app.lab.fn("timeline.speed", """{"clips":[${clip.id}],"percent":${(speed * 100).roundToInt()},"reverse":$reverse}""")
+    }
     SheetHeader("Speed · ${"%.2f".format(speed)}×", onDone)
     Slider(pos, { pos = it }, valueRange = -2f..2f, onValueChangeFinished = { apply() }, modifier = Modifier.padding(horizontal = 16.dp))
     Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         listOf(0.5, 1.0, 2.0).forEach { s -> FilterChip(selected = speed in s - 0.01..s + 0.01, onClick = { pos = (ln(s) / ln(2.0)).toFloat(); apply() }, label = { Text("${s}×") }) }
         Text("Reverse", Modifier.padding(start = 12.dp))
         Switch(reverse, { reverse = it; apply() })
+    }
+    Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Smooth slow motion (optical flow)", fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Switch(smooth, { smooth = it; if (speed < 1.0) apply() })
     }
 }
 
@@ -234,7 +249,57 @@ private fun CaptionSheet(app: VideoLabApp, playhead: Double, onDone: () -> Unit)
             scope.launch { app.lab.fn("text.caption", """{"text":${q(t)},"seconds":$playhead,"duration":2.5}""") }
         }, enabled = text.isNotBlank(), modifier = Modifier.padding(start = 8.dp)) { Text("Add") }
     }
-    Text("Ask the agent to caption a whole video from its dialogue.", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+    SpeechTools(app)
+}
+
+/**
+ * Whisper on the phone: auto captions, remove pauses, remove filler words. The first use
+ * downloads the speech model (whisper-tiny, 150 MB) after asking.
+ */
+@Composable
+private fun SpeechTools(app: VideoLabApp) {
+    val scope = rememberCoroutineScope()
+    var installed by remember { mutableStateOf<Boolean?>(null) }
+    var confirm by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf("") }
+    var progress by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(Unit) { installed = dev.argo.videolab.core.SpeechModels.installed(app.lab) }
+    fun run(fn: String, label: String) {
+        scope.launch {
+            if (installed != true) {
+                status = "Downloading the speech model…"
+                progress = 0f
+                val ok = dev.argo.videolab.core.SpeechModels.ensure(app.lab) { p -> progress = p.fraction; status = "Downloading the speech model · ${p.done / 1_000_000} of ${p.total / 1_000_000} MB" }
+                if (ok.isFailure) {
+                    status = "Download failed: ${ok.exceptionOrNull()?.message}"
+                    progress = null
+                    return@launch
+                }
+                installed = true
+            }
+            status = "$label…"
+            progress = null
+            val r = app.lab.fn(fn)
+            status = if (r.isSuccess) "$label: done" else ""
+        }
+    }
+    Text("From what is said", color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
+    Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        val busy = status.endsWith("…") || progress != null
+        listOf(Triple("speech.captions", "Auto captions", true), Triple("speech.removePauses", "Remove pauses", false), Triple("speech.removeFillers", "Remove “um”s", false)).forEach { (fn, label, primary) ->
+            val go = { if (installed == true) run(fn, label) else confirm = fn }
+            if (primary) Button(onClick = go, enabled = !busy) { Text(label) } else TextButton(onClick = go, enabled = !busy) { Text(label) }
+        }
+    }
+    confirm?.let { fn ->
+        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Speech recognition runs on this phone. Download the model (150 MB) once?", fontSize = 12.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = { confirm = null; run(fn, mapOf("speech.captions" to "Auto captions", "speech.removePauses" to "Remove pauses", "speech.removeFillers" to "Remove “um”s")[fn] ?: fn) }) { Text("Download") }
+            TextButton(onClick = { confirm = null }) { Text("Not now") }
+        }
+    }
+    progress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) }
+    if (status.isNotEmpty()) Text(status, color = Color.Gray, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp))
 }
 
 @Composable

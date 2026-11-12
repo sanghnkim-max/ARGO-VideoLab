@@ -100,9 +100,13 @@ cargo run -p videolab-cli -- script cut.js --root ./workspace --out-dir out/
 * **Home:** new project from videos, 9:16 / 16:9 / 1:1, FilmCraft's demo project, saved projects.
 * **Editor:** preview (wgpu/Vulkan or CPU, shown bottom-left), transport, a phone timeline with a
   fixed centre playhead (drag to scrub, pinch to zoom, tap to select, drag handles to trim),
-  filmstrips and waveforms; tool bar: Media, Audio, Text, Templates, Captions, Split, Agent; with
-  a clip selected: Split, Volume, Speed, Fade, Transition, Delete. Export 480p/720p/1080p MP4 or
-  GIF, then share.
+  filmstrips and waveforms; tool bar: Media, Audio, Text, Templates, Captions (manual, **auto
+  captions**, remove pauses / “um”s), Effects, Filters, Adjust, **Text to speech**, Split, Agent;
+  with a clip selected: Split, Volume, Speed (with **smooth slow motion**), Fade, Transition,
+  **Filters, Effects, Adjust, Transform** (keyframes: the ◇ by the transport), **Freeze,
+  Reverse, Mirror, Rotate, Auto cut**; on sound: **Auto duck, Loudness**. Export
+  480p/720p/1080p MP4 or GIF, then share. All of these are registry functions (`look`, `clip`,
+  `audio`, `speech`), so agents can use them too.
 * **Agent:** Settings → Agent → your Anthropic API key (sealed with an Android Keystore key).
 
 Licence: Apache-2.0. FilmCraft is MIT OR Apache-2.0.
