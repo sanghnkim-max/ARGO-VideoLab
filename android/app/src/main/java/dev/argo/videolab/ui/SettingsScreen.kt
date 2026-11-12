@@ -126,6 +126,14 @@ private fun EngineSettings(app: VideoLabApp) {
     var gpuActive by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) { gpuActive = app.lab.io { it.gpuStatus().getOrNull(1) }.getOrNull() }
     Section("Engine")
+    var stats by remember { mutableStateOf(app.settings.showStats) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Show playback stats on the preview")
+            Text("Renderer, hardware-decoded frames and frame rate, for checking performance.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
+        Switch(checked = stats, onCheckedChange = { stats = it; app.settings.showStats = it })
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("GPU rendering (FilmCraft's wgpu compositor on Vulkan)")

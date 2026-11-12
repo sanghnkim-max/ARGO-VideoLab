@@ -75,6 +75,9 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
     var selected by rememberSaveable { mutableStateOf<Long?>(null) }
     var tool by rememberSaveable { mutableStateOf<Tool?>(null) }
     var agentOpen by rememberSaveable { mutableStateOf(false) }
+    // The open tool group (a second-level bar, as CapCut's), null for the top level.
+    var group by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(selected) { group = null }
     // The playhead, read where it is drawn (the timeline's canvas, the time label) rather than
     // here: while playing it moves every display frame, and only those should redraw for it.
     val live = remember { mutableDoubleStateOf(0.0) }
@@ -153,12 +156,145 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
         }
     }
 
-    // Back: close the open sheet, then the agent, then the project (saved, as ✕ does).
+    fun deselect() {
+        selected = null
+        scope.launch { lab.exec("timeline.select", """{"clips":[]}""") }
+    }
+
+    // Back steps out one level: the sheet, the agent, the tool group, the selected clip, then the
+    // project (saved, as ✕ does).
     BackHandler {
         when {
             tool != null -> tool = null
             agentOpen -> agentOpen = false
+            group != null -> group = null
+            selected != null -> deselect()
             else -> closeProject()
+        }
+    }
+
+    fun clipIds(id: Long) = """{"clips":[$id]}"""
+
+    /** Picture tools on the clip under the playhead (it becomes the selection). */
+    fun onClipHere(t: Tool) {
+        val here = timeline?.videoTracks?.firstOrNull()?.clips?.firstOrNull { playheadNow() >= it.start && playheadNow() < it.end }
+        if (here == null) lab.showMessage("Move the playhead over a video clip first") else {
+            selected = here.id
+            tool = t
+            scope.launch { lab.exec("timeline.select", """{"clips":[${here.id}]}""") }
+        }
+    }
+
+    /**
+     * The bar with nothing selected: six categories, each opening its tools (CapCut's layout).
+     * Copy, paste, duplicate and delete are on the timeline (long-press, or tap the selected clip).
+     */
+    fun mainBar(g: String?): List<BarItem> = when (g) {
+        "edit" -> listOf(
+            BarItem(Sym.addMedia, "Media") { pickMedia.launch(arrayOf("video/*", "image/*")) },
+            BarItem(Sym.split, "Split all") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"all":true}""") } },
+            BarItem(Sym.closeGaps, "Close gaps") { scope.launch { lab.fn("project.closeGaps").onSuccess { if ("\"moved\":0" in it.toString()) lab.showMessage("No gaps on the main track") } } },
+        )
+        "audio" -> listOf(
+            BarItem(Sym.music, "Music") { pickMedia.launch(arrayOf("audio/*")) },
+            BarItem(Sym.narrate, "Narration") { tool = Tool.Narrate },
+        )
+        "text" -> listOf(
+            BarItem(Sym.text, "Text") { tool = Tool.Text },
+            BarItem(Sym.templates, "Templates") { tool = Tool.Templates },
+            BarItem(Sym.captions, "Captions") { tool = Tool.Captions },
+        )
+        "effects" -> listOf(
+            BarItem(Sym.effects, "Effects") { onClipHere(Tool.Effects) },
+            BarItem(Sym.filters, "Filters") { onClipHere(Tool.Filters) },
+            BarItem(Sym.adjust, "Adjust") { onClipHere(Tool.Adjust) },
+        )
+        else -> listOf(
+            BarItem(Sym.movie, "Edit") { group = "edit" },
+            BarItem(Sym.music, "Audio") { group = "audio" },
+            BarItem(Sym.text, "Text") { group = "text" },
+            BarItem(Sym.effects, "Effects") { group = "effects" },
+            BarItem(Sym.canvas, "Canvas") { tool = Tool.Canvas },
+            BarItem(Sym.agent, "Agent") { agentOpen = true },
+        )
+    }
+
+    /**
+     * The bar for the selected clip: a handful of tools by kind, the rest in groups. Back (the
+     * system gesture) steps out of a group, then deselects.
+     */
+    fun clipBar(clip: dev.argo.videolab.core.Clip, g: String?): List<BarItem> {
+        val ids = clipIds(clip.id)
+        val split = BarItem(Sym.split, "Split") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"clip":${clip.id}}""") } }
+        val delete = BarItem(Sym.delete, "Delete") {
+            scope.launch { lab.fn("timeline.delete", """{"clips":[${clip.id}],"ripple":${clip.kind == ClipKind.Video}}""") }
+            selected = null
+        }
+        val speed = BarItem(Sym.speed, "Speed") { tool = Tool.Speed }
+        val volume = BarItem(Sym.volume, "Volume") { tool = Tool.Volume }
+        val fade = BarItem(Sym.fade, "Fade") { tool = Tool.Fade }
+        val voice = BarItem(Sym.voice, "Voice fx") { tool = Tool.Voice }
+        val video = clip.kind == ClipKind.Video
+        return when (g) {
+            "look" -> listOf(
+                BarItem(Sym.filters, "Filters") { tool = Tool.Filters },
+                BarItem(Sym.effects, "Effects") { tool = Tool.Effects },
+                BarItem(Sym.adjust, "Adjust") { tool = Tool.Adjust },
+            )
+            "edit" -> listOf(
+                BarItem(Sym.transform, "Transform") { tool = Tool.Transform },
+                BarItem(Sym.crop, "Crop") { tool = Tool.Crop },
+                BarItem(Sym.mask, "Mask") { tool = Tool.Mask },
+                BarItem(Sym.rotate, "Rotate") { scope.launch { lab.fn("clip.rotate", ids) } },
+                BarItem(Sym.mirror, "Mirror") { scope.launch { lab.fn("clip.mirror", ids) } },
+                BarItem(Sym.opacity, "Opacity") { tool = Tool.Blend },
+                BarItem(Sym.chromaKey, "Chroma key") { tool = Tool.ChromaKey },
+            )
+            "motion" -> listOfNotNull(
+                fade,
+                BarItem(Sym.transition, "Transition") { tool = Tool.Transition },
+                if (video) BarItem(Sym.freeze, "Freeze") { scope.launch { lab.fn("clip.freeze", """{"clip":${clip.id},"seconds":${playheadNow()}}""") } } else null,
+                if (video) BarItem(Sym.reverse, "Reverse") { scope.launch { lab.fn("clip.reverse", ids) } } else null,
+                if (video) BarItem(Sym.stabilize, "Stabilize") {
+                    scope.launch { lab.fn("compose.stabilize", ids).onSuccess { toast(if ("true" in it.toString()) "Stabilizing in the background; it shows when ready" else "Stabilize off") } }
+                } else null,
+                if (video) BarItem(Sym.reframe, "Reframe") { scope.launch { lab.fn("compose.autoReframe", ids).onSuccess { toast(if ("true" in it.toString()) "Auto reframe on" else "Auto reframe off") } } } else null,
+                if (video) BarItem(Sym.autoCut, "Auto cut") { scope.launch { lab.fn("clip.autoCut", ids) } } else null,
+            )
+            "audio" -> listOf(
+                volume,
+                voice,
+                BarItem(Sym.detach, "Detach") {
+                    scope.launch { lab.fn("compose.detachAudio", ids).onSuccess { toast(if ("[]" in it.toString()) "The sound is already separate" else "Sound detached") } }
+                },
+            )
+            "sound" -> listOf(
+                BarItem(Sym.duck, "Auto duck") { scope.launch { lab.fn("audio.duck", """{"music":[${clip.id}]}""").onSuccess { toast("Music lowered under speech") } } },
+                BarItem(Sym.loudness, "Loudness") { scope.launch { lab.fn("audio.normalize", ids).onSuccess { toast("Loudness evened out") } } },
+            )
+            else -> when (clip.kind) {
+                ClipKind.Video -> listOf(
+                    split, speed,
+                    BarItem(Sym.volume, "Audio") { group = "audio" },
+                    BarItem(Sym.filters, "Look") { group = "look" },
+                    BarItem(Sym.transform, "Edit") { group = "edit" },
+                    BarItem(Sym.slowmo, "Motion") { group = "motion" },
+                    delete,
+                )
+                ClipKind.Still -> listOf(
+                    split,
+                    BarItem(Sym.filters, "Look") { group = "look" },
+                    BarItem(Sym.transform, "Edit") { group = "edit" },
+                    BarItem(Sym.slowmo, "Motion") { group = "motion" },
+                    delete,
+                )
+                ClipKind.Audio, ClipKind.Music -> listOf(
+                    split, speed, volume, fade, voice,
+                    BarItem(Sym.loudness, "Sound") { group = "sound" },
+                    delete,
+                )
+                ClipKind.Graphic -> listOf(split, BarItem(Sym.transform, "Transform") { tool = Tool.Transform }, fade, delete)
+            }
         }
     }
 
@@ -186,16 +322,15 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                         ProgramMonitor(app, playing, state.version)
                     }
                     // ── transport ──────────────────────────────────────────────────────────
-                    Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        TimeLabel(playheadNow, timeline?.duration ?: 0.0)
-                        Spacer(Modifier.weight(1f))
-                        SymButton(Sym.skipPrev, "Go to start", { player.stop(); commitSeek(0.0) })
+                    // Time, play, and keyframe / undo / redo: CapCut's slim row under the preview.
+                    Row(Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) { TimeLabel(playheadNow, timeline?.duration ?: 0.0) }
                         SymButton(if (playing) Sym.pause else Sym.play, if (playing) "Pause" else "Play", { player.toggle() })
-                        SymButton(Sym.skipNext, "Go to end", { player.stop(); commitSeek(timeline?.duration ?: 0.0) })
-                        Spacer(Modifier.weight(1f))
+                        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                         KeyframeButton(lab, selected?.let { timeline?.clip(it) }, timeline?.fps ?: 30.0, playheadNow)
                         SymButton(Sym.undo, "Undo", { scope.launch { lab.fn("doc.undo") } })
                         SymButton(Sym.redo, "Redo", { scope.launch { lab.fn("doc.redo") } })
+                        }
                     }
                     // ── timeline ───────────────────────────────────────────────────────────
                     if (timeline != null) {
@@ -243,80 +378,11 @@ fun EditorScreen(app: VideoLabApp, onClose: () -> Unit, onSettings: () -> Unit, 
                     val current = tool
                     if (current != null) {
                         ToolSheet(app, current, clip, playheadNow(), onDone = { tool = null })
-                    } else if (clip != null) {
-                        ToolBar {
-                            ToolButton(Sym.back, "Back") { selected = null; scope.launch { lab.exec("timeline.select", """{"clips":[]}""") } }
-                            ToolButton(Sym.split, "Split") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"clip":${clip.id}}""") } }
-                            if (clip.kind != ClipKind.Graphic) ToolButton(Sym.volume, "Volume") { tool = Tool.Volume }
-                            if (clip.kind != ClipKind.Graphic) ToolButton(Sym.speed, "Speed") { tool = Tool.Speed }
-                            ToolButton(Sym.fade, "Fade") { tool = Tool.Fade }
-                            if (clip.kind == ClipKind.Video || clip.kind == ClipKind.Still) ToolButton(Sym.transition, "Transition") { tool = Tool.Transition }
-                            val picture = clip.kind == ClipKind.Video || clip.kind == ClipKind.Still
-                            val ids = """{"clips":[${clip.id}]}"""
-                            if (picture) {
-                                ToolButton(Sym.filters, "Filters") { tool = Tool.Filters }
-                                ToolButton(Sym.effects, "Effects") { tool = Tool.Effects }
-                                ToolButton(Sym.adjust, "Adjust") { tool = Tool.Adjust }
-                            }
-                            if (clip.kind != ClipKind.Audio) ToolButton(Sym.transform, "Transform") { tool = Tool.Transform }
-                            if (picture) {
-                                ToolButton(Sym.crop, "Crop") { tool = Tool.Crop }
-                                ToolButton(Sym.mask, "Mask") { tool = Tool.Mask }
-                                ToolButton(Sym.opacity, "Opacity") { tool = Tool.Blend }
-                                ToolButton(Sym.chromaKey, "Chroma key") { tool = Tool.ChromaKey }
-                            }
-                            if (clip.kind == ClipKind.Video) {
-                                ToolButton(Sym.stabilize, "Stabilize") { scope.launch { lab.fn("compose.stabilize", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Stabilizing: it is analysed in the background (paused while you play) and shows when ready" else "Stabilize off") } } }
-                                ToolButton(Sym.reframe, "Reframe") { scope.launch { lab.fn("compose.autoReframe", ids).onSuccess { lab.showMessage(if ("true" in it.toString()) "Auto reframe on" else "Auto reframe off") } } }
-                            }
-                            if (clip.kind == ClipKind.Video) {
-                                ToolButton(Sym.freeze, "Freeze") { scope.launch { lab.fn("clip.freeze", """{"clip":${clip.id},"seconds":${playheadNow()}}""") } }
-                                ToolButton(Sym.reverse, "Reverse") { scope.launch { lab.fn("clip.reverse", ids) } }
-                            }
-                            if (picture) {
-                                ToolButton(Sym.mirror, "Mirror") { scope.launch { lab.fn("clip.mirror", ids) } }
-                                ToolButton(Sym.rotate, "Rotate") { scope.launch { lab.fn("clip.rotate", ids) } }
-                            }
-                            if (clip.kind == ClipKind.Video) ToolButton(Sym.autoCut, "Auto cut") { scope.launch { lab.fn("clip.autoCut", ids) } }
-                            if (clip.kind != ClipKind.Graphic) ToolButton(Sym.voice, "Voice fx") { tool = Tool.Voice }
-                            if (clip.kind == ClipKind.Video) ToolButton(Sym.detach, "Detach audio") {
-                                scope.launch { lab.fn("compose.detachAudio", ids).onSuccess { lab.showMessage(if ("[]" in it.toString()) "This clip's sound is already separate" else "Sound detached: it is its own clip now") } }
-                            }
-                            ToolButton(Sym.duplicate, "Duplicate") { scope.launch { lab.fn("compose.duplicate", """{"clip":${clip.id}}""") } }
-                            if (clip.kind == ClipKind.Audio) {
-                                ToolButton(Sym.duck, "Auto duck") { scope.launch { lab.fn("audio.duck", """{"music":[${clip.id}]}""") } }
-                                ToolButton(Sym.loudness, "Loudness") { scope.launch { lab.fn("audio.normalize", ids) } }
-                            }
-                            ToolButton(Sym.delete, "Delete") {
-                                scope.launch { lab.fn("timeline.delete", """{"clips":[${clip.id}],"ripple":${clip.kind == ClipKind.Video}}""") }
-                                selected = null
-                            }
-                            ToolButton(Sym.agent, "Ask agent") { agentOpen = true }
-                        }
                     } else {
+                        val bar = if (clip != null) clipBar(clip, group) else mainBar(group)
                         ToolBar {
-                            ToolButton(Sym.addMedia, "Media") { pickMedia.launch(arrayOf("video/*", "image/*")) }
-                            ToolButton(Sym.music, "Audio") { pickMedia.launch(arrayOf("audio/*")) }
-                            ToolButton(Sym.text, "Text") { tool = Tool.Text }
-                            ToolButton(Sym.templates, "Templates") { tool = Tool.Templates }
-                            ToolButton(Sym.captions, "Captions") { tool = Tool.Captions }
-                            // Picture tools on the clip under the playhead (it becomes the selection).
-                            fun onClipHere(t: Tool) {
-                                val here = timeline?.videoTracks?.firstOrNull()?.clips?.firstOrNull { playheadNow() >= it.start && playheadNow() < it.end }
-                                if (here == null) lab.showMessage("Move the playhead over a video clip first") else {
-                                    selected = here.id
-                                    tool = t
-                                    scope.launch { lab.exec("timeline.select", """{"clips":[${here.id}]}""") }
-                                }
-                            }
-                            ToolButton(Sym.effects, "Effects") { onClipHere(Tool.Effects) }
-                            ToolButton(Sym.filters, "Filters") { onClipHere(Tool.Filters) }
-                            ToolButton(Sym.adjust, "Adjust") { onClipHere(Tool.Adjust) }
-                            ToolButton(Sym.narrate, "Narration") { tool = Tool.Narrate }
-                            ToolButton(Sym.canvas, "Canvas") { tool = Tool.Canvas }
-                            ToolButton(Sym.closeGaps, "Close gaps") { scope.launch { lab.fn("project.closeGaps").onSuccess { if ("\"moved\":0" in it.toString()) lab.showMessage("No gaps on the main track") } } }
-                            ToolButton(Sym.split, "Split all") { scope.launch { lab.fn("timeline.split", """{"seconds":${playheadNow()},"all":true}""") } }
-                            ToolButton(Sym.agent, "Agent") { agentOpen = true }
+                            if (group != null) ToolButton(Sym.back, "Back") { group = null }
+                            bar.forEach { ToolButton(it.icon, it.label, it.onClick) }
                         }
                     }
                 }
@@ -347,10 +413,13 @@ private fun ToolBar(content: @Composable () -> Unit) {
     ) { content() }
 }
 
+/** One button of a bottom bar. */
+class BarItem(val icon: Int, val label: String, val onClick: () -> Unit)
+
 @Composable
 private fun ToolButton(icon: Int, label: String, onClick: () -> Unit) {
     Column(
-        Modifier.width(68.dp).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
+        Modifier.width(58.dp).clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         SymIcon(icon, null, Modifier.size(24.dp), tint = Color.White)
@@ -382,7 +451,7 @@ private fun BoxScope.ProgramMonitor(app: VideoLabApp, playing: Boolean, version:
     }
     var hw by remember { mutableStateOf("") }
     LaunchedEffect(playing, version) {
-        while (true) {
+        while (app.settings.showStats) {
             hw = lab.io { it.decodeStats() }.getOrNull()?.let { j ->
                 val o = lab.parse(j) as? kotlinx.serialization.json.JsonObject
                 val stats = (o?.get("stats") as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
@@ -405,7 +474,7 @@ private fun BoxScope.ProgramMonitor(app: VideoLabApp, playing: Boolean, version:
             }
             .padding(horizontal = 8.dp, vertical = 4.dp),
     )
-    Text(
+    if (app.settings.showStats) Text(
         buildString {
             append(f?.renderer.orEmpty().uppercase())
             if (hw.isNotEmpty()) append(" · ").append(hw)

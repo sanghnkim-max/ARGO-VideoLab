@@ -43,6 +43,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("gpu", true)
         set(v) = prefs.edit().putBoolean("gpu", v).apply()
 
+    /** Show the renderer, decoder counts and frame rate on the preview (off: a clean monitor). */
+    var showStats: Boolean
+        get() = prefs.getBoolean("show_stats", false)
+        set(v) = prefs.edit().putBoolean("show_stats", v).apply()
+
     /** Playback resolution: 1 (full), 2 (half) or 4 (quarter) of the sequence's size. */
     var playbackDivisor: Int
         get() = prefs.getInt("playback_divisor", 2).takeIf { it in setOf(1, 2, 4) } ?: 2

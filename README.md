@@ -98,18 +98,24 @@ cargo run -p videolab-cli -- script cut.js --root ./workspace --out-dir out/
 ## App
 
 * **Home:** new project from videos, 9:16 / 16:9 / 1:1, FilmCraft's demo project, saved projects.
-* **Editor:** preview (wgpu/Vulkan or CPU, shown bottom-left), transport, a phone timeline with a
-  fixed centre playhead (drag to scrub, pinch to zoom, tap to select, drag handles to trim),
-  filmstrips and waveforms; tool bar: Media, Audio, Text, Templates, Captions (manual, **auto
-  captions**, remove pauses / “um”s), Effects, Filters, Adjust, **Text to speech**, **Canvas**
-  (9:16, 16:9, 1:1, 4:5…), **Close gaps**, Split, Agent;
-  with a clip selected: Split, Volume, Speed (with **smooth slow motion**), Fade, Transition,
-  **Filters, Effects, Adjust, Transform** (keyframes: the ◇ by the transport), **Freeze,
-  Reverse, Mirror, Rotate, Crop, Mask, Opacity / blend, Chroma key, Stabilize, Auto reframe,
-  Auto cut, Voice effects, Detach audio, Duplicate**; on sound: **Auto duck, Loudness, Voice
-  effects, Enhance voice**. Export 480p/720p/1080p MP4 (the phone's hardware H.264 encoder) or
-  GIF, or the edit itself as Premiere XML, FCPXML, EDL, OTIO or AAF for a desktop editor, then share. All of these are registry functions (`look`, `clip`, `compose`, `project`,
-  `audio`, `speech`), so agents can use them too.
+* **Editor:** preview (wgpu/Vulkan or CPU), a slim row under it (time, play, keyframe ◇, undo,
+  redo), and a phone timeline with a fixed centre playhead: drag to scrub, pinch to zoom, tap to
+  select, drag handles to trim, long-press to move, **swipe down on a clip to split**, tap the
+  selected clip (or long-press and let go) for **Split / Cut / Copy / Paste / Duplicate / Delete**,
+  two-finger tap to undo. Tools are in two levels, as in CapCut:
+  * nothing selected: **Edit** (media, split all, close gaps), **Audio** (music, text to speech),
+    **Text** (text, templates, captions with **auto captions** and pause / “um” removal),
+    **Effects** (effects, filters, adjust), **Canvas** (9:16, 16:9, 1:1, 4:5…), **Agent**;
+  * a video clip: Split, Speed, **Audio** (volume, voice effects, detach), **Look** (filters,
+    effects, adjust), **Edit** (transform with keyframes, crop, mask, rotate, mirror, opacity /
+    blend, chroma key), **Motion** (fade, transition, freeze, reverse, stabilize, auto reframe,
+    auto cut), Delete; sound and title clips get their own short bars.
+
+  Back steps out a level (sheet, group, selection, then saves and closes the project). Export
+  480p/720p/1080p MP4 (the phone's hardware H.264 encoder) or GIF, or the edit itself as Premiere
+  XML, FCPXML, EDL, OTIO or AAF for a desktop editor, then share. All of these are registry
+  functions (`look`, `clip`, `compose`, `project`, `audio`, `speech`, `timeline`), so agents can use
+  them too.
 * **Agent:** Settings → Agent → your Anthropic API key (sealed with an Android Keystore key).
 
 Licence: Apache-2.0. FilmCraft is MIT OR Apache-2.0.
