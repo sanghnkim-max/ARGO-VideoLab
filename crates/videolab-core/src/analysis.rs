@@ -98,6 +98,22 @@ struct Stripped {
     copy: Arc<Project>,
 }
 
+thread_local! {
+    static QUICK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` as a quick render (playback, scrubbing): see [`Analyses::strip_unready`].
+pub fn with_quick<R>(f: impl FnOnce() -> R) -> R {
+    let before = QUICK.with(|q| q.replace(true));
+    let out = f();
+    QUICK.with(|q| q.set(before));
+    out
+}
+
+fn quick() -> bool {
+    QUICK.with(std::cell::Cell::get)
+}
+
 fn epoch() -> Instant {
     static E: OnceLock<Instant> = OnceLock::new();
     *E.get_or_init(Instant::now)
@@ -120,13 +136,14 @@ impl Analyses {
     }
 
     /// `project` (a render snapshot) without the analysed effects of clips whose analysis is not
-    /// done, queueing their analysis; while playback runs, also with optical-flow slow motion
-    /// drawn by frame sampling. Unchanged (no copy) when neither applies.
+    /// done, queueing their analysis; for a quick render ([`with_quick`]: playback, a scrub),
+    /// also with optical-flow slow motion drawn by frame sampling. Unchanged (no copy) when
+    /// neither applies.
     ///
     /// Optical flow estimates motion between two source frames for every frame it draws: on 4K
     /// phone footage that is hundreds of milliseconds a frame, so playback crawled at 2 to 8 fps.
-    /// Playback draws such clips as Premiere does before they are rendered (frame sampling);
-    /// paused frames and exports keep optical flow.
+    /// Playback and scrubbing draw such clips as Premiere does before they are rendered (frame
+    /// sampling); the frame a scrub stops on, paused frames and exports keep optical flow.
     pub fn strip_unready(
         self: &Arc<Self>,
         project: Arc<Project>,
@@ -166,7 +183,7 @@ impl Analyses {
         for job in jobs {
             self.queue(job);
         }
-        let sampled = self.playing() && q.all_tracks().flat_map(|t| t.items.iter()).any(|it| it.time_interpolation == TimeInterpolation::OpticalFlow);
+        let sampled = quick() && q.all_tracks().flat_map(|t| t.items.iter()).any(|it| it.time_interpolation == TimeInterpolation::OpticalFlow);
         if unready.is_empty() && !sampled {
             *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = None;
             return project;

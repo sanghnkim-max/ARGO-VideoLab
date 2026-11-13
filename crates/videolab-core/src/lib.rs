@@ -407,7 +407,7 @@ impl Lab {
         };
         let draft = max_side < full;
         self.engine.analyses.note_playback();
-        filmcraft_media::cancel::with_draft(draft, || filmcraft_media::cancel::with_catch_up(Some(filmcraft_time::Tick::ZERO), || self.engine.render(t, max_side))).map_err(LabError::Engine)
+        crate::analysis::with_quick(|| filmcraft_media::cancel::with_draft(draft, || filmcraft_media::cancel::with_catch_up(Some(filmcraft_time::Tick::ZERO), || self.engine.render(t, max_side)))).map_err(LabError::Engine)
     }
 
     pub fn thumbnails(&self, item: u64, seconds: &[f64], height: u32) -> Result<Vec<Rgba>> {

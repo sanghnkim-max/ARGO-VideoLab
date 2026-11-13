@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
@@ -97,8 +98,22 @@ class Lab(createApi: () -> VideoLab, private val scope: CoroutineScope) {
                 refresh()
             }
         }
+        // A scrub renders each position as playback does (quick: optical-flow slow motion by frame
+        // sampling, drafts where decoders can take them), then the position it stops on once at
+        // full quality: optical flow on 4K footage is hundreds of milliseconds a frame, which made
+        // dragging the playhead crawl.
         scope.launch {
-            for (seconds in frameRequests) renderFrame(seconds, PREVIEW_SIDE)
+            var unsettled: Double? = null
+            while (true) {
+                val next = if (unsettled == null) frameRequests.receive() else withTimeoutOrNull(SETTLE_MS) { frameRequests.receive() }
+                if (next == null) {
+                    renderFrame(unsettled!!, PREVIEW_SIDE)
+                    unsettled = null
+                } else {
+                    renderFrame(next, quickSide(), quick = true)
+                    unsettled = next
+                }
+            }
         }
     }
 
@@ -150,11 +165,17 @@ class Lab(createApi: () -> VideoLab, private val scope: CoroutineScope) {
         }
     }
 
+    /** A scrub frame's longest side: playback's default (half the sequence's), the settled frame sharpens it. */
+    private fun quickSide(): Int {
+        val t = _state.value.timeline
+        return (maxOf(t?.width ?: 1920, t?.height ?: 1920) / 2).coerceIn(320, PREVIEW_SIDE)
+    }
+
     /** Render the program frame at [seconds] into the preview. */
-    suspend fun renderFrame(seconds: Double, maxSide: Int): Boolean = renderLock.withLock {
+    suspend fun renderFrame(seconds: Double, maxSide: Int, quick: Boolean = false): Boolean = renderLock.withLock {
         withContext(Dispatchers.IO) {
             val api = runCatching { apiDeferred.await() }.getOrNull() ?: return@withContext false
-            val frame = runCatching { api.render(seconds, maxSide.toUInt()) }.getOrNull() ?: return@withContext false
+            val frame = runCatching { if (quick) api.renderPlayback(seconds, maxSide.toUInt()) else api.render(seconds, maxSide.toUInt()) }.getOrNull() ?: return@withContext false
             val bitmap = frame.toBitmap() ?: return@withContext false
             showFrame(bitmap, seconds, frame.renderer)
             true
@@ -240,6 +261,9 @@ class Lab(createApi: () -> VideoLab, private val scope: CoroutineScope) {
     companion object {
         /** Longest side of the paused preview; the player renders smaller. */
         const val PREVIEW_SIDE = 1280
+
+        /** A scrub has stopped once no new position came for this long: render it at full quality. */
+        private const val SETTLE_MS = 200L
         const val PEAKS_PER_SECOND = 20
         private const val REFRESH_DEBOUNCE_MS = 60L
 

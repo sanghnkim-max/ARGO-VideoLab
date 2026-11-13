@@ -151,6 +151,9 @@ impl Engine {
             (to_rgba(&img)?, Renderer::Cpu, composed)
         };
         RENDER_TIMES.note(started.elapsed(), out.2);
+        if out.2 > SLOW_FRAME {
+            log::info!("slow frame at {:.2} s: {} ms on the {:?} renderer; under it: {}", t.seconds(), out.2.as_millis(), out.1, layers_at(&snap, t));
+        }
         Ok((out.0, out.1))
     }
 
@@ -396,4 +399,22 @@ impl RenderTimes {
         );
         *g = None;
     }
+}
+
+/// A preview frame slower than this is logged with what is under it.
+const SLOW_FRAME: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The clips at `t`, with their speed, interpolation, transitions and effects: what a slow frame
+/// was made of.
+fn layers_at(snap: &Snapshot, t: Tick) -> String {
+    let Some(q) = snap.project.sequence(snap.seq) else { return String::new() };
+    q.all_tracks()
+        .flat_map(|track| track.items.iter())
+        .filter(|it| it.start <= t && t < it.end())
+        .map(|it| {
+            let effects: Vec<&str> = it.effects.iter().filter(|e| e.enabled).map(|e| e.effect.as_str()).collect();
+            format!("item {} x{} {:?} [{}]", it.item.0, it.speed, it.time_interpolation, effects.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }

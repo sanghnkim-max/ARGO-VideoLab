@@ -619,7 +619,7 @@ fn a_raw_export_runs_as_a_job_on_the_hardware_encoder() {
 }
 
 #[test]
-fn playback_draws_optical_flow_by_frame_sampling() {
+fn quick_renders_draw_optical_flow_by_frame_sampling() {
     use filmcraft_project::TimeInterpolation;
     let (_d, lab) = lab();
     demo(&lab);
@@ -632,8 +632,9 @@ fn playback_draws_optical_flow_by_frame_sampling() {
         p.sequence(seq).unwrap().all_tracks().flat_map(|t| t.items.iter()).find(|i| i.id.0 == clip).unwrap().time_interpolation
     };
     assert_eq!(interp(&lab), TimeInterpolation::OpticalFlow, "a paused frame keeps optical flow");
+    assert_eq!(crate::analysis::with_quick(|| interp(&lab)), TimeInterpolation::FrameSampling, "playback and scrubbing sample");
+    // Right after a quick render (still within playback's grace), a full render is optical flow:
+    // the frame a scrub stops on.
     lab.engine.analyses.note_playback();
-    assert_eq!(interp(&lab), TimeInterpolation::FrameSampling, "playback samples");
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    assert_eq!(interp(&lab), TimeInterpolation::OpticalFlow, "back to optical flow once playback stops");
+    assert_eq!(interp(&lab), TimeInterpolation::OpticalFlow, "a settled frame keeps optical flow");
 }
