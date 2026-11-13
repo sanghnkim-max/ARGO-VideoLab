@@ -7,3 +7,6 @@ android/app/build
 android/app/src/*/jniLibs
 .DS_Store
 .claude/worktrees
+
+# Build output of the vendored FilmCraft workspace (its own tests)
+third_party/filmcraft/target/

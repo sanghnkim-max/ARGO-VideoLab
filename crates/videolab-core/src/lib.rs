@@ -26,6 +26,7 @@
 
 pub mod areas;
 pub mod analysis;
+pub mod proxy;
 pub mod control;
 pub mod engine;
 pub mod features;

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["third_party"]
 members = ["crates/lab-api", "crates/lab-script", "crates/lab-mcp", "crates/videolab-core", "crates/videolab-ffi", "crates/videolab-cli", "tools/uniffi-bindgen"]
 
 [workspace.package]
@@ -74,3 +75,9 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# FilmCraft's render and gpu crates with VideoLab's Lumetri-on-the-GPU patch (third_party/filmcraft,
+# PATCHES.md there); every other FilmCraft crate is the git dependency above, at the same rev.
+[patch."https://github.com/storytold/filmcraft"]
+filmcraft-render = { path = "third_party/filmcraft/crates/render" }
+filmcraft-gpu = { path = "third_party/filmcraft/crates/gpu" }

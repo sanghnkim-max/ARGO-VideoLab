@@ -60,6 +60,8 @@ pub struct Engine {
     thumb_sources: Mutex<ThumbSources>,
     /// Stabilizer / reframe analysis, in the background (see `analysis`).
     pub analyses: Arc<crate::analysis::Analyses>,
+    /// Quarter-size proxies of heavy media, made in the background (see `proxy`).
+    pub proxies: crate::proxy::Proxies,
 }
 
 #[derive(Default)]
@@ -75,7 +77,7 @@ impl Engine {
     /// A session over `services` (the workspace).
     pub fn new(services: Arc<crate::services::WorkspaceServices>) -> Self {
         let session = Session::new(services.clone());
-        Self { session: Arc::new(Mutex::new(session)), services, gpu: Mutex::new(None), gpu_wanted: AtomicBool::new(false), gpu_failed: AtomicBool::new(false), thumb_sources: Mutex::default(), analyses: Arc::default() }
+        Self { session: Arc::new(Mutex::new(session)), services, gpu: Mutex::new(None), gpu_wanted: AtomicBool::new(false), gpu_failed: AtomicBool::new(false), thumb_sources: Mutex::default(), analyses: Arc::default(), proxies: crate::proxy::Proxies::default() }
     }
 
     /// A workspace path (relative, or absolute inside it) as the absolute path the engine stores.
@@ -122,7 +124,14 @@ impl Engine {
         let rate = g.sequence_rate();
         // Clips still being analysed draw without their stabilizer / reframe (see `analysis`).
         let project = self.analyses.strip_unready(g.project.clone(), seq, &g.media, &g.services);
-        let provider = g.media.provider(project.clone(), g.services.clone());
+        // Quick renders (playback, scrubbing) read proxies where there are any; every other frame
+        // the original (see `proxy`).
+        g.media.set_use_proxies(true);
+        let provider = if crate::analysis::quick() && self.proxies.enabled() {
+            g.media.provider(project.clone(), g.services.clone())
+        } else {
+            g.media.full_res_provider(project.clone(), g.services.clone())
+        };
         Ok(Snapshot { project, seq, provider, rate, width, height })
     }
 
@@ -145,7 +154,7 @@ impl Engine {
             let composed = started.elapsed();
             (to_rgba(&img)?, Renderer::Gpu, composed)
         } else {
-            let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filmcraft_render::render_sequence(&snap.project, snap.seq, t, opts, &snap.provider)))
+            let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| filmcraft_render::render_sequence(&snap.project, snap.seq, t, opts, &Timed(&snap.provider))))
                 .map_err(|_| "rendering panicked".to_string())?;
             let composed = started.elapsed();
             (to_rgba(&img)?, Renderer::Cpu, composed)
@@ -169,7 +178,7 @@ impl Engine {
             if slot.is_none() {
                 *slot = filmcraft_gpu::ExportRenderer::new();
             }
-            slot.as_mut().and_then(|r| r.render(&snap.project, snap.seq, t, opts, &snap.provider))
+            slot.as_mut().and_then(|r| r.render(&snap.project, snap.seq, t, opts, &Timed(&snap.provider)))
         }));
         match result {
             Ok(Some(img)) if img.w > 0 && img.h > 0 => Some(img),
@@ -370,12 +379,24 @@ struct RenderWindow {
     total: Duration,
     composed: Duration,
     gop: filmcraft_codecs::gop::GopStats,
+    gpu: filmcraft_gpu::export_renderer::timing::GpuTimings,
+    copy: (Duration, u64),
+    fetch: Duration,
 }
 
 impl RenderTimes {
     fn note(&self, total: Duration, composed: Duration) {
         let mut g = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let w = g.get_or_insert_with(|| RenderWindow { since: std::time::Instant::now(), renders: 0, total: Duration::ZERO, composed: Duration::ZERO, gop: filmcraft_codecs::gop::gop_stats() });
+        let w = g.get_or_insert_with(|| RenderWindow {
+            since: std::time::Instant::now(),
+            renders: 0,
+            total: Duration::ZERO,
+            composed: Duration::ZERO,
+            gop: filmcraft_codecs::gop::gop_stats(),
+            gpu: filmcraft_gpu::export_renderer::timing::get(),
+            copy: copy_totals(),
+            fetch: fetch_total(),
+        });
         w.renders += 1;
         w.total += total;
         w.composed += composed;
@@ -397,6 +418,23 @@ impl RenderTimes {
             now.misses - w.gop.misses,
             (now.decode_ns - w.gop.decode_ns) as f64 / 1e6,
         );
+        // Where a frame's time goes, per render: copying decoded pictures out of MediaCodec, the
+        // GPU's command recording (texture uploads included), waiting for the GPU and mapping
+        // the read-back, and converting it from half floats.
+        let gpu = filmcraft_gpu::export_renderer::timing::get();
+        let (copy, bytes) = copy_totals();
+        let per = |d: Duration| d.as_secs_f64() * 1000.0 / n;
+        log::info!(
+            "frame split: fetching source frames {:.1} ms (of which copy out of MediaCodec {:.1} ms, {:.1} MB), GPU record+upload {:.1} ms, GPU wait+map {:.1} ms, half-float convert {:.1} ms, {} of {} frames on the GPU",
+            per(fetch_total().saturating_sub(w.fetch)),
+            per(copy.saturating_sub(w.copy.0)),
+            (bytes - w.copy.1) as f64 / 1e6 / n,
+            per(gpu.submit.saturating_sub(w.gpu.submit)),
+            per(gpu.map_wait.saturating_sub(w.gpu.map_wait)),
+            per(gpu.convert.saturating_sub(w.gpu.convert)),
+            gpu.frames - w.gpu.frames,
+            w.renders,
+        );
         *g = None;
     }
 }
@@ -417,4 +455,60 @@ fn layers_at(snap: &Snapshot, t: Tick) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Time and bytes spent copying hardware-decoded pictures to the CPU (none off Android).
+fn copy_totals() -> (Duration, u64) {
+    #[cfg(target_os = "android")]
+    return crate::mediacodec::copy_totals();
+    #[cfg(not(target_os = "android"))]
+    (Duration::ZERO, 0)
+}
+
+/// Time preview renders spent in their sources' `video_frame` (decode, copies, the media layer's
+/// own conversions), process total.
+static FETCH_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fetch_total() -> Duration {
+    Duration::from_nanos(FETCH_NS.load(Ordering::Relaxed))
+}
+
+/// The snapshot's sources, timed: what a preview frame waits for its pictures.
+struct Timed<'a>(&'a filmcraft_engine::media_pool::PoolProvider);
+
+impl filmcraft_render::SourceProvider for Timed<'_> {
+    fn source(&self, item: ItemId) -> Option<filmcraft_media::SharedSource> {
+        self.0.source(item).map(|inner| Arc::new(TimedSource { inner }) as filmcraft_media::SharedSource)
+    }
+}
+
+struct TimedSource {
+    inner: filmcraft_media::SharedSource,
+}
+
+impl TimedSource {
+    fn timed<T>(&self, f: impl FnOnce() -> T) -> T {
+        let started = std::time::Instant::now();
+        let out = f();
+        FETCH_NS.fetch_add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        out
+    }
+}
+
+impl filmcraft_media::MediaSource for TimedSource {
+    fn info(&self) -> &filmcraft_media::MediaInfo {
+        self.inner.info()
+    }
+    fn video_frame(&self, req: filmcraft_media::FrameRequest) -> filmcraft_media::Result<Arc<filmcraft_frame::VideoFrame>> {
+        self.timed(|| self.inner.video_frame(req))
+    }
+    fn video_frame_unturned(&self, req: filmcraft_media::FrameRequest) -> filmcraft_media::Result<(Arc<filmcraft_frame::VideoFrame>, u8)> {
+        self.timed(|| self.inner.video_frame_unturned(req))
+    }
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+        self.inner.audio(start, frames, sample_rate)
+    }
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
+        self.inner.audio_stream(stream, start, frames, sample_rate)
+    }
 }

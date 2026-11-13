@@ -110,7 +110,7 @@ pub fn with_quick<R>(f: impl FnOnce() -> R) -> R {
     out
 }
 
-fn quick() -> bool {
+pub(crate) fn quick() -> bool {
     QUICK.with(std::cell::Cell::get)
 }
 

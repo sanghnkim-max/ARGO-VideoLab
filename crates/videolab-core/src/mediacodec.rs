@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use filmcraft_codecs::hw::{NalCodec, NalStreamInfo};
@@ -48,6 +48,16 @@ const PTS_OFFSET: i64 = 1 << 40;
 const MAX_IN_FLIGHT: usize = 6;
 
 /// `VIDEOLAB_MC_DEBUG=1`: trace codec events to stderr (the CLI's bench-decode).
+/// Time and bytes spent copying decoded pictures out of MediaCodec's buffers into planar frames
+/// (process totals, for the engine's render statistics).
+static COPY_NS: AtomicU64 = AtomicU64::new(0);
+static COPY_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// `(copy time, bytes copied)` since the process started.
+pub fn copy_totals() -> (Duration, u64) {
+    (Duration::from_nanos(COPY_NS.load(Ordering::Relaxed)), COPY_BYTES.load(Ordering::Relaxed))
+}
+
 fn debug() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VIDEOLAB_MC_DEBUG").is_some())
@@ -485,11 +495,14 @@ impl MediaCodecDecoder {
         let start = usize::try_from(info.offset()).ok()?;
         let len = usize::try_from(info.size()).ok()?;
         let bytes = data.get(start..start.saturating_add(len))?;
+        let copying = std::time::Instant::now();
         let pixels = if layout.bits > 8 {
             layout.copy16(bytes).map(|[y, u, v]| PixelData::Yuv16 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, bits: layout.bits, alpha: None })
         } else {
             layout.copy(bytes).map(|[y, u, v]| PixelData::Yuv8 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma: Chroma::C420, alpha: None })
         };
+        COPY_NS.fetch_add(u64::try_from(copying.elapsed().as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        COPY_BYTES.fetch_add(len as u64, Ordering::Relaxed);
         let Some(pixels) = pixels else {
             log::warn!("{}: picture of {len} bytes does not fit {layout:?}", self.name);
             return None;

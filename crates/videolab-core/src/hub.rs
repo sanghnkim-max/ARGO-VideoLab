@@ -70,13 +70,15 @@ fn mark(engine: &Engine) -> Mark {
     (g.revision, g.playhead().0, g.state.active_sequence.map(|s| s.0))
 }
 
-fn report(seen: &Mutex<Option<Mark>>, shared: &Shared, current: Mark, source: Source) {
+fn report(seen: &Mutex<Option<Mark>>, shared: &Shared, engine: &Arc<Engine>, current: Mark, source: Source) {
     let mut s = seen.lock().unwrap_or_else(PoisonError::into_inner);
     if *s == Some(current) {
         return;
     }
     *s = Some(current);
     drop(s);
+    // New heavy media (imported, or a project opened) gets a proxy in the background.
+    engine.proxies.nudge(engine);
     shared.events.emit(Event::DocChanged { doc: current.2.unwrap_or(0) as usize, revision: current.0, source });
 }
 
@@ -86,7 +88,7 @@ impl Core {
         // Live preview: every editing call (each step of a script included) announces its change
         // as soon as it returns.
         let (s2, e2) = (seen.clone(), engine.clone());
-        registry.set_after_mutation(Arc::new(move |ctx: &Ctx| report(&s2, &ctx.shared, mark(&e2), ctx.source)));
+        registry.set_after_mutation(Arc::new(move |ctx: &Ctx| report(&s2, &ctx.shared, &e2, mark(&e2), ctx.source)));
         Self { registry, shared, engine, sink, seen, in_flight: AtomicUsize::new(0), running: Mutex::new(Vec::new()) }
     }
 
@@ -125,7 +127,7 @@ impl Core {
 
     /// Emit `DocChanged` attributed to `source` if the document, playhead or sequence moved.
     pub(crate) fn notice(&self, source: Source) {
-        report(&self.seen, &self.shared, mark(&self.engine), source);
+        report(&self.seen, &self.shared, &self.engine, mark(&self.engine), source);
     }
 
     /// [`Core::notice`] that gives up when the session is busy (the watcher).
@@ -134,7 +136,7 @@ impl Core {
             Ok(g) => (g.revision, g.playhead().0, g.state.active_sequence.map(|s| s.0)),
             Err(_) => return,
         };
-        report(&self.seen, &self.shared, current, source);
+        report(&self.seen, &self.shared, &self.engine, current, source);
     }
 }
 

@@ -1,0 +1,126 @@
+# FilmCraft's render and gpu crates at db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b, carried by VideoLab with a patch FilmCraft does not
+# have yet: Lumetri's per-pixel colour grade (looks, curves, wheels) baked into a 3D LUT that the
+# GPU effect stage applies, so a filtered clip no longer renders its effects on the CPU every
+# frame. VideoLab's Cargo.toml routes filmcraft-render and filmcraft-gpu here with [patch]; every
+# other FilmCraft crate stays the git dependency at the same rev. See PATCHES.md.
+
+[workspace]
+resolver = "3"
+members = ["crates/render", "crates/gpu"]
+
+[workspace.package]
+version = "0.20.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/storytold/filmcraft"
+
+[workspace.dependencies]
+filmcraft-render = { path = "crates/render" }
+filmcraft-gpu = { path = "crates/gpu" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-audio-dsp = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-captions = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-text = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+filmcraft-export = { git = "https://github.com/storytold/filmcraft", rev = "db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b" }
+rayon = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+log = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+wildcard_imports = "deny"
+dbg_macro = "warn"
+todo = "warn"
+needless_range_loop = "allow"
+type_complexity = "allow"
+
+# The other FilmCraft crates (git) use these two as well: one copy of each.
+[patch."https://github.com/storytold/filmcraft"]
+filmcraft-render = { path = "crates/render" }
+filmcraft-gpu = { path = "crates/gpu" }
+
+# FilmCraft's own build profiles, so its tests run as they do upstream (its perf tests assume optimised dependencies).
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+# Codec hot loops: debug-build tests (RFC/oracle vectors) are minutes slower below opt-level 3.
+[profile.dev.package.filmcraft-h264]
+opt-level = 3
+
+[profile.dev.package.filmcraft-h264enc]
+opt-level = 3
+
+[profile.dev.package.filmcraft-hevc]
+opt-level = 3
+
+[profile.dev.package.filmcraft-prores]
+opt-level = 3
+
+[profile.dev.package.filmcraft-dnx]
+opt-level = 3
+
+[profile.dev.package.filmcraft-apv]
+opt-level = 3
+
+[profile.dev.package.filmcraft-dng]
+opt-level = 3
+
+[profile.dev.package.filmcraft-av1]
+opt-level = 3
+
+[profile.dev.package.craft-audio]
+opt-level = 3
+
+[profile.dev.package.filmcraft-mp3enc]
+opt-level = 3
+
+# Audio effects: realtime-factor tests and long convolution / spectral runs.
+[profile.dev.package.filmcraft-audio-dsp]
+opt-level = 3
+
+[profile.dev.package.filmcraft-mxf]
+opt-level = 3
+
+[profile.dev.package.filmcraft-vp8]
+opt-level = 3
+
+[profile.dev.package.filmcraft-vp9]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Keep the complete egui family and native event bridge on reviewed fork commits.
+[patch.crates-io]
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }

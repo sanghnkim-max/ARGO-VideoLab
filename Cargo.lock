@@ -1054,7 +1054,6 @@ dependencies = [
 [[package]]
 name = "filmcraft-gpu"
 version = "0.20.1"
-source = "git+https://github.com/storytold/filmcraft?rev=db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b#db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b"
 dependencies = [
  "filmcraft-color",
  "filmcraft-frame",
@@ -1232,7 +1231,6 @@ dependencies = [
 [[package]]
 name = "filmcraft-render"
 version = "0.20.1"
-source = "git+https://github.com/storytold/filmcraft?rev=db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b#db60ee45c2f5a5a125f26e4f6fc5de0b74fb811b"
 dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-captions",
