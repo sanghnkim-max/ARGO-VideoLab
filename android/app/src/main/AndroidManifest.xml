@@ -4,6 +4,8 @@
     <!-- The in-app agent calls the Claude API; the MCP server and FilmCraft's control channel
          listen on 127.0.0.1 only. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Bind ARGO's core as a client tab (ArgoAgent); ARGO admits it only for an allow-listed signer. -->
+    <uses-permission android:name="com.argo.android.permission.BIND_CORE" />
     <!-- Read picked videos, sound and pictures where they are (no copy); never written. -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -12,6 +14,11 @@
 
     <!-- FilmCraft's GPU compositor runs on Vulkan through wgpu; phones without it use the CPU. -->
     <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="false" />
+
+    <!-- ARGO, the one caller LabService answers (its signature is checked on every call). -->
+    <queries>
+        <package android:name="com.argo.android" />
+    </queries>
 
     <application
         android:name=".VideoLabApp"
@@ -46,5 +53,17 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
+        <!--
+            The companion wire: the ARGO app's agent drives VideoLab here (ImageLab's ILabService
+            contract). Exported so ARGO can bind it; LabService answers only a caller signed by a
+            pinned ARGO certificate.
+        -->
+        <service
+            android:name=".companion.LabService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="dev.argo.videolab.action.COMPANION" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

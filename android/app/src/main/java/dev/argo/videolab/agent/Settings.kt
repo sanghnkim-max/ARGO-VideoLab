@@ -59,8 +59,13 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putBoolean("filmcraft_tools", v).apply()
 
     var mcpPort: Int
-        get() = prefs.getInt("mcp_port", 7700)
+        get() = prefs.getInt("mcp_port", 7710) // ImageLab serves 7700
         set(v) = prefs.edit().putInt("mcp_port", v).apply()
+
+    /** ARGO may mount VideoLab's MCP server as a companion (companion/CompanionProvider.kt). */
+    var argoCompanion: Boolean
+        get() = prefs.getBoolean("argo_companion", true)
+        set(v) = prefs.edit().putBoolean("argo_companion", v).apply()
 
     /** MCP clients may edit (otherwise read-only tools only, §8). */
     var mcpAllowEdits: Boolean

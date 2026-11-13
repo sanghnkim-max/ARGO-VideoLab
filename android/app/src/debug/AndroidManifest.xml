@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug only: drive ARGO's agent from adb (argo.ArgoProbe). Only the shell holds DUMP. -->
+        <receiver
+            android:name=".argo.ArgoProbe"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="dev.argo.videolab.ARGO_PROBE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

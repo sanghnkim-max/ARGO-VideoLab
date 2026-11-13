@@ -327,6 +327,11 @@ impl VideoLab {
     }
 
     /// One MCP request to VideoLab's own server (`lab_read`, `lab_script`, `lab_help`).
+    /// One JSON-RPC message from ARGO (the companion service): the response, or "" for a notification.
+    pub fn companion_mcp(&self, message: String) -> Result<String> {
+        Ok(self.lab.companion_mcp(&message)?)
+    }
+
     pub fn lab_mcp_request(&self, method: String, params_json: String) -> Result<String> {
         Ok(text(&self.lab.lab_mcp_request(&method, parse(&params_json)?)?))
     }

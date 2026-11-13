@@ -18,8 +18,23 @@ pub(crate) fn engine(ctx: &Ctx) -> ApiResult<&Engine> {
     ctx.state::<Engine>()
 }
 
-pub(crate) fn run(ctx: &Ctx, id: &str, params: Value) -> ApiResult<Value> {
+pub(crate) fn run(ctx: &Ctx, id: &str, mut params: Value) -> ApiResult<Value> {
+    if id == "file.exportMedia" {
+        export_as_job(&mut params);
+    }
     engine(ctx)?.execute(id, params).map_err(ApiError::engine)
+}
+
+/// A media export, however it is asked for (`export.start`, or `file.exportMedia` through
+/// `engine.run` / `engine.batch`), runs as a job with the phone's hardware encoder where it can:
+/// a waiting export holds the engine (every other call, the preview) for its whole length, and
+/// FilmCraft's software encoder renders a 1080p reel at under 1 fps on a phone. The caller polls
+/// `export.jobs`; an encoder named by the caller is kept.
+pub(crate) fn export_as_job(params: &mut Value) {
+    if let Some(p) = params.as_object_mut() {
+        p.insert("wait".into(), json!(false));
+        p.entry("hardwareEncoding").or_insert(json!("auto"));
+    }
 }
 
 pub(crate) fn ticks(seconds: f64) -> i64 {
@@ -283,11 +298,11 @@ fn register_doc(r: &mut Registry) {
     struct Path {
         path: Option<String>,
     }
-    r.function("doc", "save", "Save the project (.fcproj) — to `path` beneath the workspace, or where it was opened from")
-        .params(json!({"type": "object", "properties": {"path": {"type": "string", "description": "e.g. projects/trip.fcproj"}}}))
+    r.function("doc", "save", "Save the project (.fcproj) — to `path` beneath the workspace (a bare name goes to projects/, where the app lists projects), or where it was opened from")
+        .params(json!({"type": "object", "properties": {"path": {"type": "string", "description": "e.g. \"Trip\" or projects/trip.fcproj"}}}))
         .effects(Effects::Destructive)
         .typed(|ctx, p: Path| match p.path {
-            Some(path) => run(ctx, "file.saveAs", json!({"path": path})),
+            Some(path) => run(ctx, "file.saveAs", json!({"path": project_path(&path)})),
             None => run(ctx, "file.save", json!({})),
         })
         .register();
@@ -296,10 +311,10 @@ fn register_doc(r: &mut Registry) {
     struct Open {
         path: String,
     }
-    r.function("doc", "open", "Open a .fcproj project from the workspace (unsaved changes to the current one are lost)")
+    r.function("doc", "open", "Open a .fcproj project from the workspace (a bare name is looked up in projects/; unsaved changes to the current one are lost)")
         .params(json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}))
         .effects(Effects::Destructive)
-        .typed(|ctx, p: Open| run(ctx, "file.open", json!({"path": p.path})))
+        .typed(|ctx, p: Open| run(ctx, "file.open", json!({"path": project_path(&p.path)})))
         .register();
 
     #[derive(Deserialize, Default)]
@@ -883,7 +898,7 @@ fn register_export(r: &mut Registry) {
         scale: Option<f64>,
     }
     r.function("export", "start", "Export the active sequence to `path` (e.g. exports/cut.mp4); returns at once with a job id")
-        .description("{path, format?: h264|hevc|prores|gif|png|wav|aac|mp3… (default from the extension), preset?: an export preset name, range?: entire|inOut|workArea, scale?: 0.5}. Poll export.jobs.")
+        .description("{path, format?: h264|hevc|prores|gif|png|wav|aac|mp3… (default from the extension), preset?: an export preset name, range?: entire|inOut|workArea, scale?: 0.5}. Poll export.jobs. On the phone a finished video also appears in the Gallery (Movies/VideoLab; a GIF in Pictures/VideoLab), which is where to tell the person to look.")
         .params(json!({"type": "object", "properties": {"path": {"type": "string"}, "format": {"type": "string"}, "preset": {"type": "string"}, "range": {"type": "string"}, "scale": {"type": "number"}}, "required": ["path"]}))
         .effects(Effects::Destructive)
         .typed(|ctx, p: Start| {
@@ -935,4 +950,12 @@ fn register_export(r: &mut Registry) {
         .effects(Effects::Revertible)
         .typed(|ctx, p: Cancel| run(ctx, "jobs.cancel", json!({"job": p.job})))
         .register();
+}
+
+/// Where a project named by the agent lives: a bare name (no folder) in [`crate::PROJECTS_DIR`], where
+/// the app lists projects, with `.fcproj` added when missing; a path with a folder as given.
+pub(crate) fn project_path(path: &str) -> String {
+    let path = path.trim();
+    let named = if path.to_ascii_lowercase().ends_with(".fcproj") { path.to_string() } else { format!("{path}.fcproj") };
+    if named.contains('/') || named.contains('\\') { named } else { format!("{}/{named}", crate::PROJECTS_DIR) }
 }

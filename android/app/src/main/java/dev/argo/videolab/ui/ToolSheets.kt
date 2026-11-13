@@ -389,7 +389,7 @@ private fun ExportSheet(app: VideoLabApp, onDone: () -> Unit) {
                         status = (j.s("status") ?: "") + (eta?.let { " · ${it.roundToInt()} s left" } ?: "")
                         if ((j["finished"] as? JsonPrimitive)?.booleanOrNull == true) {
                             val err = (j["result"] as? JsonObject)?.s("error")
-                            status = err?.let { "Failed: $it" } ?: "Saved to ${file.name}"
+                            status = err?.let { "Failed: $it" } ?: "Saved to ${dev.argo.videolab.core.GalleryExports.where(file.name)}"
                             if (err == null) { done = file; progress = 1f }
                             job = null
                         }

@@ -5,6 +5,7 @@ import android.app.Application
 import android.os.Bundle
 import dev.argo.videolab.agent.Agent
 import dev.argo.videolab.agent.Settings
+import dev.argo.videolab.core.GalleryExports
 import dev.argo.videolab.core.Lab
 import dev.argo.videolab.core.Player
 import dev.argo.videolab.core.VideoLab
@@ -38,12 +39,16 @@ class VideoLabApp : Application() {
     val player: Player by lazy { Player(lab, appScope).also { it.divisor.value = settings.playbackDivisor } }
     val agent: Agent by lazy { Agent(lab, settings) }
 
+    /** Finished exports, copied to the phone's Gallery where the person can see them. */
+    val gallery: GalleryExports by lazy { GalleryExports(this, workspace, { lab }, appScope) }
+
     /** The activity on screen, for screenshots requested over FilmCraft's control channel. */
     @Volatile var currentActivity: WeakReference<Activity>? = null
     @Volatile var route: String = "home"
 
     override fun onCreate() {
         super.onCreate()
+        gallery.start()
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) { currentActivity = WeakReference(activity) }
             override fun onActivityPaused(activity: Activity) {}

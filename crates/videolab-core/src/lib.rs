@@ -30,6 +30,7 @@ pub mod control;
 pub mod engine;
 pub mod features;
 mod hub;
+mod mcp_extras;
 #[cfg(target_os = "android")]
 pub mod mediacodec;
 #[cfg(target_os = "android")]
@@ -43,7 +44,7 @@ use std::time::Duration;
 
 pub use lab_api;
 use lab_api::{ApiError, ApiResult, EventSink, Handles, Registry, Shared, Source};
-use lab_mcp::{HttpServer, InProcess, LabMcp, LabServerInfo, ScriptHost};
+use lab_mcp::{HttpServer, InProcess, LabMcp, LabPrompt, MessageWire, LabResource, LabResourceBody, LabServerInfo, ScriptHost};
 pub use lab_script;
 use lab_script::ScriptOutcome;
 use serde_json::{Value, json};
@@ -131,6 +132,25 @@ impl ScriptHost for Host {
     fn run_script(&self, code: &str, read_only: bool, timeout: Duration, source: Source, cancel: Arc<AtomicBool>) -> ScriptOutcome {
         self.0.run_script(code, read_only, timeout, source, cancel)
     }
+    fn call_function(&self, id: &str, params: Value, source: Source, _read_only: bool) -> lab_api::ApiResult<Value> {
+        // `LabMcp` lists (and so calls) editing functions only when edits are allowed.
+        self.0.call(id, params, source)
+    }
+    fn handles(&self) -> Option<&lab_api::Handles> {
+        Some(&self.0.shared.handles)
+    }
+    fn resources(&self) -> Vec<LabResource> {
+        mcp_extras::resources()
+    }
+    fn read_resource(&self, uri: &str) -> std::result::Result<LabResourceBody, String> {
+        mcp_extras::read(&self.0, uri)
+    }
+    fn prompts(&self) -> Vec<LabPrompt> {
+        mcp_extras::prompts()
+    }
+    fn prompt(&self, name: &str, args: &serde_json::Map<String, Value>) -> std::result::Result<String, String> {
+        mcp_extras::prompt(name, args)
+    }
 }
 
 fn server_info() -> Arc<LabServerInfo> {
@@ -155,6 +175,8 @@ pub struct Lab {
     token: String,
     filmcraft_in_process: InProcess,
     lab_in_process: InProcess,
+    /// The MCP server ARGO's agent drives over VideoLab's companion service (`companion_mcp`).
+    companion: MessageWire,
     http: Mutex<Option<HttpServer>>,
     cli_path: Option<PathBuf>,
     _watcher: Watcher,
@@ -248,6 +270,7 @@ impl Lab {
         // The in-app agent is the person's own: edits allowed, events attributed to the agent.
         let lab = LabMcp::new(Arc::new(Host(core.clone())), server_info(), true, Source::Agent);
         let lab_in_process = runtime.block_on(InProcess::start(lab, "videolab-app"))?;
+        let companion_core = core.clone();
         Ok(Self {
             root,
             temp,
@@ -259,6 +282,13 @@ impl Lab {
             token,
             filmcraft_in_process,
             lab_in_process,
+            companion: {
+                let core = companion_core;
+                // ARGO mounts it as `videolab`: the program tools, every function as a tool of its
+                // own, the resources and the prompts; edits allowed (the person turns the companion
+                // off in VideoLab's Settings, where the service then refuses).
+                MessageWire::new(move || LabMcp::new(Arc::new(Host(core.clone())), server_info(), true, Source::Mcp).with_function_tools(true))
+            },
             http: Mutex::new(None),
             cli_path: options.cli_path.clone(),
             _watcher: watcher,
@@ -451,6 +481,12 @@ impl Lab {
     }
 
     /// One MCP request to VideoLab's own server (`lab_read`, `lab_script`, `lab_help`), edits allowed.
+    /// One JSON-RPC message from ARGO's agent to VideoLab's MCP server (the companion service's
+    /// `mcp` op): its response as text, or empty for a notification.
+    pub fn companion_mcp(&self, message: &str) -> Result<String> {
+        Ok(self.runtime.block_on(self.companion.send(message))?.unwrap_or_default())
+    }
+
     pub fn lab_mcp_request(&self, method: &str, params: Value) -> Result<Value> {
         self.runtime.block_on(self.lab_in_process.request(method, params)).map_err(LabError::from)
     }
@@ -460,7 +496,9 @@ impl Lab {
     /// `/filmcraft/mcp`, only with `allow_edits`. Replaces a server already running.
     pub fn start_http(&self, port: u16, token: &str, allow_edits: bool) -> Result<u16> {
         self.stop_http();
-        let lab = LabMcp::new(Arc::new(Host(self.core.clone())), server_info(), allow_edits, Source::Mcp);
+        // Every registry function as its own tool too: a client that defers tools (ARGO) loads
+        // `videolab__timeline_split` and the rest on demand.
+        let lab = LabMcp::new(Arc::new(Host(self.core.clone())), server_info(), allow_edits, Source::Mcp).with_function_tools(true);
         let addr = format!("127.0.0.1:{}", self.control.port());
         let fc = if allow_edits { Some(filmcraft_automation::FilmcraftMcp::bridge(&addr).map_err(|e| LabError::Other(e.to_string()))?) } else { None };
         let server = self.runtime.block_on(HttpServer::start(port, token.to_owned(), move |r| {

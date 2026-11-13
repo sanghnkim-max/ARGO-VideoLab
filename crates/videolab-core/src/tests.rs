@@ -552,3 +552,68 @@ fn transitions_show_and_change() {
     call("timeline.removeTransition", json!({"transition": ts[0]["id"]}));
     assert!(v1(&lab)["transitions"].as_array().unwrap().is_empty());
 }
+
+#[test]
+fn mcp_resources_and_prompts() {
+    let (_d, lab) = lab();
+    demo(&lab);
+    let list = lab.lab_mcp_request("resources/list", json!({})).unwrap();
+    let uris: Vec<&str> = list["resources"].as_array().unwrap().iter().filter_map(|r| r["uri"].as_str()).collect();
+    assert!(uris.contains(&"videolab://timeline") && uris.contains(&"videolab://frame"), "{list}");
+    let timeline = lab.lab_mcp_request("resources/read", json!({"uri": "videolab://timeline"})).unwrap();
+    let text = timeline["contents"][0]["text"].as_str().unwrap();
+    assert!(serde_json::from_str::<Value>(text).unwrap()["tracks"].is_array(), "{text}");
+    let frame = lab.lab_mcp_request("resources/read", json!({"uri": "videolab://frame"})).unwrap();
+    assert_eq!(frame["contents"][0]["mimeType"], "image/png");
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD.decode(frame["contents"][0]["blob"].as_str().unwrap()).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    assert!(lab.lab_mcp_request("resources/read", json!({"uri": "videolab://nope"})).is_err());
+    // the frame's handle is freed
+    assert!(lab.shared().handles.ids().is_empty(), "{:?}", lab.shared().handles.ids());
+
+    let prompts = lab.lab_mcp_request("prompts/list", json!({})).unwrap();
+    let names: Vec<&str> = prompts["prompts"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(names.contains(&"make_reel") && names.contains(&"color_grade"), "{prompts}");
+    let reel = lab.lab_mcp_request("prompts/get", json!({"name": "make_reel", "arguments": {"seconds": "15", "style": "calm"}})).unwrap();
+    let message = reel["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(message.contains("15-second") && message.contains("calm") && message.contains("9:16"), "{message}");
+    assert!(lab.lab_mcp_request("prompts/get", json!({"name": "color_grade"})).is_err(), "look is required");
+}
+
+/// ARGO mounts VideoLab's server as `videolab` and names each tool `videolab__<tool>`: a tool
+/// name must not contain `__` or start/end with `_`, and the joined name fits 64 bytes.
+#[test]
+fn function_tool_names_fit_argos_rules() {
+    let (_d, lab) = lab();
+    let mut names = std::collections::HashSet::new();
+    for f in lab.core.registry.functions() {
+        let name = lab_mcp::function_tool_name(&f.area, &f.name);
+        assert!(!name.contains("__") && !name.starts_with('_') && !name.ends_with('_'), "{name}");
+        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{name}");
+        assert!(format!("videolab__{name}").len() <= 64, "{name}");
+        assert!(names.insert(name.clone()), "two functions share {name}");
+        assert!(!matches!(name.as_str(), "lab_read" | "lab_script" | "lab_help"), "{name}");
+    }
+    assert!(names.len() > 80, "{}", names.len());
+}
+
+#[test]
+fn a_bare_project_name_saves_where_the_app_lists_projects() {
+    use crate::areas::project_path;
+    assert_eq!(project_path("ARGO Reel"), "projects/ARGO Reel.fcproj");
+    assert_eq!(project_path("ARGO Reel.fcproj"), "projects/ARGO Reel.fcproj");
+    assert_eq!(project_path("projects/trip.fcproj"), "projects/trip.fcproj");
+    assert_eq!(project_path("exports/cut"), "exports/cut.fcproj");
+}
+
+#[test]
+fn a_raw_export_runs_as_a_job_on_the_hardware_encoder() {
+    let mut p = serde_json::json!({"path": "exports/a.mp4", "wait": true});
+    crate::areas::export_as_job(&mut p);
+    assert_eq!((p["wait"].clone(), p["hardwareEncoding"].clone()), (serde_json::json!(false), serde_json::json!("auto")));
+    // The caller's own choice of encoder stays.
+    let mut p = serde_json::json!({"path": "exports/a.mp4", "hardwareEncoding": "off"});
+    crate::areas::export_as_job(&mut p);
+    assert_eq!(p["hardwareEncoding"], "off");
+}

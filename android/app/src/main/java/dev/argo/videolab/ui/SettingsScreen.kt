@@ -165,6 +165,7 @@ private fun McpSettings(app: VideoLabApp) {
     val scope = rememberCoroutineScope()
     var running by remember { mutableStateOf(false) }
     var allowEdits by remember { mutableStateOf(settings.mcpAllowEdits) }
+    var argo by remember { mutableStateOf(settings.argoCompanion) }
     var token by remember { mutableStateOf(settings.mcpToken) }
     var error by remember { mutableStateOf<String?>(null) }
     val port = settings.mcpPort
@@ -177,6 +178,13 @@ private fun McpSettings(app: VideoLabApp) {
             .onFailure { error = Lab.describe(it); running = false }
     }
 
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Let ARGO use VideoLab")
+            Text("The ARGO app's agent can edit videos here (its tools appear there as videolab__…). Only ARGO's own signed app can connect.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
+        Switch(checked = argo, onCheckedChange = { argo = it; settings.argoCompanion = it })
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("MCP server on 127.0.0.1:$port")
