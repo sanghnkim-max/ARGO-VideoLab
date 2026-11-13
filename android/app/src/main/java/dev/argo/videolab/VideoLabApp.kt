@@ -39,6 +39,9 @@ class VideoLabApp : Application() {
     val player: Player by lazy { Player(lab, appScope).also { it.divisor.value = settings.playbackDivisor } }
     val agent: Agent by lazy { Agent(lab, settings) }
 
+    /** The chat with ARGO's agent (the Agent pane's other side). */
+    val argo: dev.argo.videolab.argo.ArgoChat by lazy { dev.argo.videolab.argo.ArgoChat(this) }
+
     /** Finished exports, copied to the phone's Gallery where the person can see them. */
     val gallery: GalleryExports by lazy { GalleryExports(this, workspace, { lab }, appScope) }
 

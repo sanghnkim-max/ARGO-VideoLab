@@ -39,6 +39,11 @@ class Settings(context: Context) {
         set(v) = prefs.edit().putString("model", v.trim().ifEmpty { DEFAULT_MODEL }).apply()
 
     /** Read at startup; a change takes effect on the next launch (the core is made once). */
+    /** Which agent the Agent pane talks to: ARGO's (over ARGO's core) or VideoLab's own (Claude API key). Null: not chosen yet. */
+    var agentBackend: String?
+        get() = prefs.getString("agent_backend", null)
+        set(v) = prefs.edit().putString("agent_backend", v).apply()
+
     var gpu: Boolean
         get() = prefs.getBoolean("gpu", true)
         set(v) = prefs.edit().putBoolean("gpu", v).apply()

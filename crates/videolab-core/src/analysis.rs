@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use filmcraft_frame::{AudioBuffer, VideoFrame};
 use filmcraft_media::{FrameRequest, MediaInfo, MediaSource, SharedSource};
-use filmcraft_project::{ItemId, Project, TrackItem};
+use filmcraft_project::{ItemId, Project, TimeInterpolation, TrackItem};
 
 type SequenceId = ItemId;
 use filmcraft_time::Tick;
@@ -93,6 +93,8 @@ pub struct Analyses {
 struct Stripped {
     source: Arc<Project>,
     unready: Vec<(u64, &'static str)>,
+    /// Whether optical-flow slow motion was drawn with frame sampling (playback).
+    sampled: bool,
     copy: Arc<Project>,
 }
 
@@ -118,7 +120,13 @@ impl Analyses {
     }
 
     /// `project` (a render snapshot) without the analysed effects of clips whose analysis is not
-    /// done, queueing their analysis. Unchanged (no copy) when every analysis is done.
+    /// done, queueing their analysis; while playback runs, also with optical-flow slow motion
+    /// drawn by frame sampling. Unchanged (no copy) when neither applies.
+    ///
+    /// Optical flow estimates motion between two source frames for every frame it draws: on 4K
+    /// phone footage that is hundreds of milliseconds a frame, so playback crawled at 2 to 8 fps.
+    /// Playback draws such clips as Premiere does before they are rendered (frame sampling);
+    /// paused frames and exports keep optical flow.
     pub fn strip_unready(
         self: &Arc<Self>,
         project: Arc<Project>,
@@ -158,13 +166,15 @@ impl Analyses {
         for job in jobs {
             self.queue(job);
         }
-        if unready.is_empty() {
+        let sampled = self.playing() && q.all_tracks().flat_map(|t| t.items.iter()).any(|it| it.time_interpolation == TimeInterpolation::OpticalFlow);
+        if unready.is_empty() && !sampled {
             *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = None;
             return project;
         }
         if let Some(c) = self.stripped.lock().unwrap_or_else(PoisonError::into_inner).as_ref()
             && Arc::ptr_eq(&c.source, &project)
             && c.unready == unready
+            && c.sampled == sampled
         {
             return c.copy.clone();
         }
@@ -172,6 +182,9 @@ impl Analyses {
         if let Some(q) = p.sequence_mut(seq) {
             for t in q.all_tracks_mut() {
                 for it in &mut t.items {
+                    if sampled && it.time_interpolation == TimeInterpolation::OpticalFlow {
+                        it.time_interpolation = TimeInterpolation::FrameSampling;
+                    }
                     if unready.iter().any(|(c, _)| *c == it.id.0) {
                         it.effects.retain(|e| !unready.iter().any(|(c, eff)| *c == it.id.0 && e.effect == *eff));
                     }
@@ -179,7 +192,7 @@ impl Analyses {
             }
         }
         let copy = Arc::new(p);
-        *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = Some(Stripped { source: project, unready, copy: copy.clone() });
+        *self.stripped.lock().unwrap_or_else(PoisonError::into_inner) = Some(Stripped { source: project, unready, sampled, copy: copy.clone() });
         copy
     }
 

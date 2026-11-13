@@ -20,6 +20,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -48,62 +50,108 @@ import androidx.compose.ui.unit.sp
 import dev.argo.videolab.VideoLabApp
 import dev.argo.videolab.agent.Agent
 import dev.argo.videolab.agent.ChatItem
+import dev.argo.videolab.argo.ArgoChat
 import kotlinx.coroutines.launch
 
 /**
- * The agent: each tool call is a collapsed row ("Looked", "Ran a program", "FilmCraft MCP",
- * "Ran CLI") that expands to the code or arguments and the output; frames it looked at show
- * inline. Runs in the app scope, so closing the pane or rotating does not stop it.
+ * The agent pane, with two agents behind one switch: ARGO's (the phone's assistant, reached over
+ * ARGO's core; it edits through VideoLab's MCP tools and asks before it changes anything) and
+ * VideoLab's own (Claude, with the person's API key). Each tool call is a collapsed row that
+ * expands to the code or arguments and the output; frames VideoLab's agent looked at show inline.
+ * Both run beyond the pane, so closing it or rotating does not stop them.
  */
 @Composable
 fun AgentPane(app: VideoLabApp, modifier: Modifier, onClose: () -> Unit, onOpenSettings: () -> Unit) {
+    val argo = app.argo
+    var backend by rememberSaveable { mutableStateOf(app.settings.agentBackend ?: if (argo.installed) ARGO else OWN) }
+    val useArgo = backend == ARGO
+    LaunchedEffect(useArgo) { if (useArgo) argo.connect() }
     val agent = app.agent
-    val items by agent.items.collectAsState()
-    val running by agent.running.collectAsState()
+    val ownItems by agent.items.collectAsState()
+    val ownRunning by agent.running.collectAsState()
+    val argoItems by argo.items.collectAsState()
+    val argoRunning by argo.running.collectAsState()
+    val asks by argo.asks.collectAsState()
+    val problem by argo.problem.collectAsState()
+    val items = if (useArgo) argoItems else ownItems
+    val running = if (useArgo) argoRunning else ownRunning
     var input by rememberSaveable { mutableStateOf("") }
     val hasKey = remember { app.settings.hasApiKey }
     val listState = rememberLazyListState()
     val uiScope = rememberCoroutineScope()
-    LaunchedEffect(items.size) { if (items.isNotEmpty()) listState.animateScrollToItem(items.size - 1) }
+    LaunchedEffect(items.size, useArgo) { if (items.isNotEmpty()) listState.animateScrollToItem(items.size - 1) }
 
     Surface(modifier, color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.imePadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 SymIcon(Sym.agent, null, Modifier.size(20.dp), tint = Accent)
-                Text("Agent", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f).padding(start = 8.dp))
-                TextButton(onClick = agent::reset, enabled = !running) { Text("New") }
+                Row(Modifier.weight(1f).padding(start = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(ARGO to "ARGO", OWN to "VideoLab").forEach { (key, label) ->
+                        FilterChip(selected = backend == key, onClick = { backend = key; app.settings.agentBackend = key }, label = { Text(label) })
+                    }
+                }
+                TextButton(onClick = { if (useArgo) argo.reset() else agent.reset() }, enabled = !running) { Text("New") }
                 SymButton(Sym.close, "Close agent", onClose)
             }
             HorizontalDivider()
-            if (!hasKey) {
+            val banner = when {
+                useArgo -> problem
+                !hasKey -> "Add your Anthropic API key to use VideoLab's agent."
+                else -> null
+            }
+            if (banner != null) {
                 Row(Modifier.fillMaxWidth().background(Color(0x332A2A2D)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Add your Anthropic API key to use the agent.", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = onOpenSettings) { Text("Settings") }
+                    Text(banner, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    if (!useArgo) TextButton(onClick = onOpenSettings) { Text("Settings") }
                 }
             }
             LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (items.isEmpty()) {
                     item {
                         Text(
-                            "Ask for edits (“cut the silences”, “add a title at the start”, “make it 30 seconds, on the beat”). " +
-                                "The agent works through VideoLab's registry, FilmCraft's own MCP tools and the FilmCraft CLI, and shows each step here.",
+                            if (useArgo) {
+                                "Ask ARGO to edit this video (“make a 15-second reel with music”, “add captions”, “export it”). " +
+                                    "ARGO works with VideoLab's tools and asks you here before it changes anything."
+                            } else {
+                                "Ask for edits (“cut the silences”, “add a title at the start”, “make it 30 seconds, on the beat”). " +
+                                    "The agent works through VideoLab's registry, FilmCraft's own MCP tools and the FilmCraft CLI, and shows each step here."
+                            },
                             color = Color.Gray, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 12.dp),
                         )
                     }
                 }
                 itemsIndexed(items) { _, item -> ChatRow(item) }
             }
+            if (useArgo) asks.firstOrNull()?.let { ask -> AskCard(ask, more = asks.size - 1) { outcome -> argo.answer(ask, outcome) } }
             Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(input, { input = it }, placeholder = { Text("Ask the agent…") }, modifier = Modifier.weight(1f), maxLines = 4)
+                OutlinedTextField(input, { input = it }, placeholder = { Text(if (useArgo) "Ask ARGO…" else "Ask the agent…") }, modifier = Modifier.weight(1f), maxLines = 4)
                 if (running) {
-                    SymButton(Sym.stop, "Stop the agent", { uiScope.launch { agent.stop() } })
+                    SymButton(Sym.stop, "Stop the agent", { if (useArgo) argo.stop() else uiScope.launch { agent.stop() } })
                 } else {
                     SymButton(Sym.send, "Send", {
                         val t = input
                         input = ""
-                        app.appScope.launch { agent.send(t) }
+                        if (useArgo) argo.send(t) else app.appScope.launch { agent.send(t) }
                     }, enabled = input.isNotBlank())
                 }
+            }
+        }
+    }
+}
+
+private const val ARGO = "argo"
+private const val OWN = "videolab"
+
+/** ARGO waits for the person: what it wants to run, and the three answers. */
+@Composable
+private fun AskCard(ask: ArgoChat.Ask, more: Int, onAnswer: (String) -> Unit) {
+    Surface(color = Accent.copy(alpha = 0.14f), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("ARGO wants to: ${ArgoChat.label(ask.tool)}" + if (more > 0) "  (+$more more)" else "", style = MaterialTheme.typography.titleSmall)
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
+                TextButton(onClick = { onAnswer("rejected") }) { Text("Deny") }
+                if (ask.canAllowForChat) TextButton(onClick = { onAnswer("allowed-always") }) { Text("Allow in this chat") }
+                Button(onClick = { onAnswer("allowed-once") }) { Text("Allow") }
             }
         }
     }

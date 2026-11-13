@@ -617,3 +617,23 @@ fn a_raw_export_runs_as_a_job_on_the_hardware_encoder() {
     crate::areas::export_as_job(&mut p);
     assert_eq!(p["hardwareEncoding"], "off");
 }
+
+#[test]
+fn playback_draws_optical_flow_by_frame_sampling() {
+    use filmcraft_project::TimeInterpolation;
+    let (_d, lab) = lab();
+    demo(&lab);
+    let (clip, _, _) = demo_clips(&lab);
+    lab.call("clip.smoothSlowmo", json!({"clips": [clip]}), Source::Agent).unwrap();
+    let interp = |lab: &Lab| {
+        let g = lab.engine.lock();
+        let seq = g.state.active_sequence.unwrap();
+        let p = lab.engine.analyses.strip_unready(g.project.clone(), seq, &g.media, &g.services);
+        p.sequence(seq).unwrap().all_tracks().flat_map(|t| t.items.iter()).find(|i| i.id.0 == clip).unwrap().time_interpolation
+    };
+    assert_eq!(interp(&lab), TimeInterpolation::OpticalFlow, "a paused frame keeps optical flow");
+    lab.engine.analyses.note_playback();
+    assert_eq!(interp(&lab), TimeInterpolation::FrameSampling, "playback samples");
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    assert_eq!(interp(&lab), TimeInterpolation::OpticalFlow, "back to optical flow once playback stops");
+}
